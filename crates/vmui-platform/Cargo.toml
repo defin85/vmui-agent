@@ -1,0 +1,12 @@
+[package]
+name = "vmui-platform"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+futures-core.workspace = true
+vmui-protocol = { path = "../vmui-protocol" }

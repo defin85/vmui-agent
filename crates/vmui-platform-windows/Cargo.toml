@@ -1,0 +1,17 @@
+[package]
+name = "vmui-platform-windows"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+vmui-platform = { path = "../vmui-platform" }
+vmui-protocol = { path = "../vmui-protocol" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation"] }

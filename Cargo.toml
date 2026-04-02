@@ -1,0 +1,38 @@
+[workspace]
+members = [
+    "crates/vmui-agent",
+    "crates/vmui-core",
+    "crates/vmui-mcp-proxy",
+    "crates/vmui-platform",
+    "crates/vmui-platform-windows",
+    "crates/vmui-protocol",
+    "crates/vmui-transport-grpc",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.82"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["clock", "serde"] }
+futures-core = "0.3"
+futures-util = "0.3"
+prost = "0.14"
+protoc-bin-vendored = "3.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.21"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "0.14", features = ["transport"] }
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1.18", features = ["serde", "v4"] }

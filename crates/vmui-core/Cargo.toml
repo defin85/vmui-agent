@@ -1,0 +1,15 @@
+[package]
+name = "vmui-core"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+vmui-protocol = { path = "../vmui-protocol" }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "vmui-agent"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+vmui-core = { path = "../vmui-core" }
+vmui-platform = { path = "../vmui-platform" }
+vmui-platform-windows = { path = "../vmui-platform-windows" }
+vmui-protocol = { path = "../vmui-protocol" }
+vmui-transport-grpc = { path = "../vmui-transport-grpc" }
+
+[dev-dependencies]
+tempfile.workspace = true

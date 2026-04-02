@@ -1,0 +1,190 @@
+syntax = "proto3";
+
+package vmui.v1;
+
+message Empty {}
+
+enum SessionMode {
+  SESSION_MODE_UNSPECIFIED = 0;
+  SESSION_MODE_ENTERPRISE_UI = 1;
+  SESSION_MODE_CONFIGURATOR = 2;
+}
+
+enum CapturePolicy {
+  CAPTURE_POLICY_UNSPECIFIED = 0;
+  CAPTURE_POLICY_NEVER = 1;
+  CAPTURE_POLICY_ON_FAILURE = 2;
+  CAPTURE_POLICY_ALWAYS = 3;
+}
+
+message Hello {
+  string client_name = 1;
+  string client_version = 2;
+  SessionMode requested_mode = 3;
+}
+
+message HelloAck {
+  string session_id = 1;
+  string server_version = 2;
+  string backend_id = 3;
+  repeated string capabilities = 4;
+  SessionMode negotiated_mode = 5;
+}
+
+message Subscribe {
+  bool include_initial_snapshot = 1;
+  bool include_diff_stream = 2;
+  bool shallow = 3;
+}
+
+message Bounds {
+  int32 left = 1;
+  int32 top = 2;
+  int32 width = 3;
+  int32 height = 4;
+}
+
+message Property {
+  string key = 1;
+  string value_json = 2;
+}
+
+message ElementStates {
+  bool enabled = 1;
+  bool visible = 2;
+  bool focused = 3;
+  bool selected = 4;
+  bool expanded = 5;
+  bool toggled = 6;
+}
+
+message LocatorSegment {
+  string control_type = 1;
+  string class_name = 2;
+  string automation_id = 3;
+  string name = 4;
+  uint32 sibling_ordinal = 5;
+}
+
+message Locator {
+  string window_fingerprint = 1;
+  repeated LocatorSegment path = 2;
+}
+
+message ElementNode {
+  string element_id = 1;
+  string parent_id = 2;
+  string backend = 3;
+  string control_type = 4;
+  string class_name = 5;
+  string name = 6;
+  string automation_id = 7;
+  uint64 native_window_handle = 8;
+  Bounds bounds = 9;
+  Locator locator = 10;
+  repeated Property properties = 11;
+  ElementStates states = 12;
+  repeated ElementNode children = 13;
+  float confidence = 14;
+}
+
+message WindowNode {
+  string window_id = 1;
+  uint32 pid = 2;
+  string process_name = 3;
+  string title = 4;
+  Bounds bounds = 5;
+  ElementNode root = 6;
+}
+
+message InitialSnapshot {
+  string session_id = 1;
+  uint64 rev = 2;
+  SessionMode mode = 3;
+  int64 captured_at_unix_ms = 4;
+  repeated WindowNode windows = 5;
+}
+
+message DiffOp {
+  string op = 1;
+  string element_id = 2;
+  string parent_id = 3;
+  string field = 4;
+  string value_json = 5;
+  ElementNode node = 6;
+  WindowNode window = 7;
+  string window_id = 8;
+  string reason = 9;
+}
+
+message DiffBatch {
+  uint64 base_rev = 1;
+  uint64 new_rev = 2;
+  int64 emitted_at_unix_ms = 3;
+  repeated DiffOp ops = 4;
+}
+
+message ActionRequest {
+  string action_id = 1;
+  string kind = 2;
+  string target_json = 3;
+  string payload_json = 4;
+  uint64 timeout_ms = 5;
+  CapturePolicy capture_policy = 6;
+}
+
+message ReadArtifactRequest {
+  string artifact_id = 1;
+}
+
+message ArtifactReady {
+  string artifact_id = 1;
+  string kind = 2;
+  string mime_type = 3;
+  uint64 size_bytes = 4;
+}
+
+message ArtifactChunk {
+  string artifact_id = 1;
+  bytes data = 2;
+}
+
+message ActionResult {
+  string action_id = 1;
+  bool ok = 2;
+  string status = 3;
+  string message = 4;
+  repeated ArtifactReady artifacts = 5;
+}
+
+message Warning {
+  string code = 1;
+  string message = 2;
+}
+
+message ClientMsg {
+  oneof payload {
+    Hello hello = 1;
+    Subscribe subscribe = 2;
+    ActionRequest action_request = 3;
+    ReadArtifactRequest read_artifact = 4;
+    Empty ping = 5;
+  }
+}
+
+message ServerMsg {
+  oneof payload {
+    HelloAck hello_ack = 1;
+    InitialSnapshot initial_snapshot = 2;
+    DiffBatch diff_batch = 3;
+    ActionResult action_result = 4;
+    ArtifactReady artifact_ready = 5;
+    Warning warning = 6;
+    Empty pong = 7;
+  }
+}
+
+service UiAgent {
+  rpc Session(stream ClientMsg) returns (stream ServerMsg);
+  rpc ReadArtifact(ReadArtifactRequest) returns (stream ArtifactChunk);
+}

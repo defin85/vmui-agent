@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  workspace:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Set default toolchain
+        run: rustup default stable
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo check --workspace
+        run: cargo check --workspace
+
+      - name: cargo test --workspace
+        run: cargo test --workspace

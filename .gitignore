@@ -1,0 +1,7 @@
+/target
+/.idea
+/.vscode
+/.DS_Store
+/var/artifacts
+/.beads/interactions.jsonl
+/.beads/last-touched
