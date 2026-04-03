@@ -1,0 +1,11 @@
+[mcp_servers.claude-context]
+command = "bash"
+# Prefer repo-pinned Node 20, but keep claude-context usable on machines where only Node 22 is installed in nvm.
+args = ["-lc", 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; export OLLAMA_HOST="http://$(awk "/nameserver/{print \$2; exit}" /etc/resolv.conf):11434"; MCP_DIST="$HOME/code/claude-context/packages/mcp/dist/index.js"; MCP_BUILD="$HOME/code/claude-context/scripts/build-local-mcp.sh"; [ -f "$MCP_DIST" ] || { echo "Local MCP build not found: $MCP_DIST" >&2; echo "Run: $MCP_BUILD" >&2; exit 1; }; if command -v nvm >/dev/null 2>&1 && [ "$(nvm version 20 2>/dev/null)" != "N/A" ]; then nvm exec --silent 20 -- node "$MCP_DIST"; elif command -v nvm >/dev/null 2>&1 && [ "$(nvm version 22 2>/dev/null)" != "N/A" ]; then nvm exec --silent 22 -- node "$MCP_DIST"; elif command -v node >/dev/null 2>&1; then node "$MCP_DIST"; else echo "Node runtime not found. Install Node 20 or 22." >&2; exit 1; fi']
+startup_timeout_sec = 60.0
+
+[mcp_servers.claude-context.env]
+EMBEDDING_MODEL = "nomic-embed-text-v2-moe"
+EMBEDDING_PROVIDER = "Ollama"
+MILVUS_ADDRESS = "127.0.0.1:20530"
+CUSTOM_IGNORE_PATTERNS = ".beads/**,var/artifacts/**"
