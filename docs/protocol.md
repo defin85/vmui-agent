@@ -44,9 +44,13 @@
 ## Action Design Rules
 
 - Prefer semantic patterns such as invoke, value, toggle or selection before mouse coordinates.
+- `list_windows`, `get_tree`, and `write_artifact` return structured JSON through artifact references rather than inline payloads.
+- `get_tree.raw=true` returns the raw target object; `raw=false` wraps the target with contextual fields such as `window_id`.
 - Every action can emit artifacts.
 - `wait_for` is server-side and runs against the live cache plus backend events.
+- `timeout_ms` applies both to daemon-side waits and backend action execution.
 - OCR requests are explicit and scoped to a region or window.
+- `capture_region` is explicit and scoped; `window_id + bounds` is interpreted as a window-relative region.
 
 ## Artifact Policy
 
@@ -57,6 +61,7 @@
   - `snapshot-json`
   - `diff-json`
   - `screenshot-png`
+  - `screenshot-jpeg`
   - `ocr-json`
   - `annotated-png`
   - `log-text`
