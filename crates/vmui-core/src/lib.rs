@@ -393,6 +393,8 @@ mod tests {
                 process_name: Some("1cv8.exe".to_owned()),
                 title: "Test".to_owned(),
                 bounds: Rect::default(),
+                backend: BackendKind::Uia,
+                confidence: 1.0,
                 root: ElementNode {
                     element_id: ElementId::new("elt"),
                     parent_id: None,

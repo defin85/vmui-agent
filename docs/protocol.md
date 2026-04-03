@@ -36,6 +36,10 @@
 - `initial_snapshot` is the authoritative starting point for the client cache, even if the client asked to skip it.
 - `diff_batch` moves the client from `base_rev` to `new_rev`.
 - If the client misses revisions, the server emits `snapshot_resync` and follows it with a refreshed `initial_snapshot`.
+- Windows and elements carry backend provenance plus confidence so fallback-triggered refreshes stay explicit.
+- WinEvent and MSAA are treated as refresh hints; the emitted snapshot/diff remains the source of truth.
+- Window and element ids are expected to stay stable across targeted refresh when the same semantic control is matched again.
+- Locator segments should contain semantic fields first, with sibling ordinal used only as a duplicate tie-breaker.
 
 ## Action Design Rules
 

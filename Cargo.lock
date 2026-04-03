@@ -1316,6 +1316,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures-util",
+ "tokio",
+ "tokio-stream",
  "vmui-platform",
  "vmui-protocol",
  "windows",

@@ -45,6 +45,7 @@ impl BackendActionResult {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackendCapabilities {
+    pub supports_live_observer: bool,
     pub supports_uia: bool,
     pub supports_msaa: bool,
     pub supports_ocr_fallback: bool,

@@ -237,6 +237,8 @@ impl From<domain::WindowState> for pb::WindowNode {
             title: value.title,
             bounds: Some(value.bounds.into()),
             root: Some(value.root.into()),
+            backend: encode_backend_kind(value.backend),
+            confidence: value.confidence,
         }
     }
 }
@@ -258,6 +260,8 @@ impl TryFrom<pb::WindowNode> for domain::WindowState {
                 .bounds
                 .ok_or(ConvertError::MissingField("window.bounds"))?
                 .into(),
+            backend: decode_backend_kind(&value.backend)?,
+            confidence: value.confidence,
             root: value
                 .root
                 .ok_or(ConvertError::MissingField("window.root"))?
@@ -832,6 +836,8 @@ mod tests {
                     width: 300,
                     height: 200,
                 },
+                backend: BackendKind::Mixed,
+                confidence: 0.82,
                 root: ElementNode {
                     element_id: ElementId::from("elt-1"),
                     parent_id: None,

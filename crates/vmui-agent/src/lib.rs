@@ -481,6 +481,11 @@ async fn send_server_message(
 fn backend_capabilities<B: UiBackend>(backend: &B) -> Vec<String> {
     let capabilities = backend.capabilities();
     let mut labels = vec!["grpc-session".to_owned(), "artifact-read".to_owned()];
+    if capabilities.supports_live_observer {
+        labels.push("observer-active".to_owned());
+    } else {
+        labels.push("observer-unavailable".to_owned());
+    }
     if capabilities.supports_uia {
         labels.push("uia".to_owned());
     }
@@ -598,6 +603,7 @@ mod tests {
 
         fn capabilities(&self) -> BackendCapabilities {
             BackendCapabilities {
+                supports_live_observer: true,
                 supports_uia: false,
                 supports_msaa: false,
                 supports_ocr_fallback: false,
@@ -1000,6 +1006,8 @@ mod tests {
                     width: 800,
                     height: 600,
                 },
+                backend: BackendKind::Mixed,
+                confidence: 0.9,
                 root: ElementNode {
                     element_id: ElementId::from("elt-1"),
                     parent_id: None,

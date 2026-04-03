@@ -30,6 +30,13 @@ The system SHALL support WinEvent and MSAA/IAccessible as fallback inputs for ob
 - **THEN** the backend uses WinEvent and/or MSAA to locate the affected surface or trigger a targeted refresh
 - **AND** the resulting node metadata records that fallback provenance was used
 
+#### Scenario: Fallback hint triggers a successful UIA refresh
+
+- **WHEN** WinEvent or MSAA only acts as the trigger for a refresh
+- **AND** the affected window can still be rebuilt from UIA
+- **THEN** the refreshed window keeps UIA as its backend provenance
+- **AND** the backend does not replace the whole window only because the refresh was triggered by a fallback hint
+
 ### Requirement: Event-driven refresh
 
 The system SHALL transform backend events into targeted state refresh instead of full desktop rescans on every change.
@@ -39,3 +46,14 @@ The system SHALL transform backend events into targeted state refresh instead of
 - **WHEN** the active element changes within a tracked window
 - **THEN** the backend refreshes only the relevant scope needed to produce an updated diff
 - **AND** it does not rescan unrelated windows as the default behavior
+
+### Requirement: Session-stable identity and locators
+
+The system SHALL expose session-stable window and element identifiers together with reusable semantic locators.
+
+#### Scenario: Tree order changes but the same control remains present
+
+- **WHEN** a subtree is rebuilt or sibling order changes within the same tracked window
+- **THEN** the backend keeps the existing session id for the matched window and element
+- **AND** the locator uses semantic fields such as control type, class name, automation id, and name
+- **AND** sibling ordinal is used only as a duplicate tie-breaker

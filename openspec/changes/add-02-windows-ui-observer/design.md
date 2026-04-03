@@ -23,6 +23,14 @@ The backend must produce live state without falling back to screenshot polling. 
   - Alternatives considered:
     - Update cache directly from raw events without targeted refresh.
   - Rationale: backend event fidelity is inconsistent, especially on custom controls.
+- Decision: Separate refresh hint provenance from the actual backend that produced the refreshed snapshot.
+  - Alternatives considered:
+    - Mark an entire refreshed window as `mixed` whenever a fallback hint triggered the refresh.
+  - Rationale: the source that caused the refresh is not automatically the source of truth for the refreshed tree.
+- Decision: Use session-stable ids with semantic locators and rebind matching instead of raw `hwnd + child index` identity.
+  - Alternatives considered:
+    - Derive all ids directly from ordinal tree paths.
+  - Rationale: Windows/1C trees reorder often enough that ordinal-only identity is too unstable for a debugger-like model.
 
 ## Risks / Trade-offs
 
@@ -30,6 +38,8 @@ The backend must produce live state without falling back to screenshot polling. 
   - Mitigation: isolate the observer implementation in the Windows backend crate and keep async/runtime boundaries explicit.
 - Some controls may remain opaque.
   - Mitigation: surface provenance and confidence so later layers can apply fallback strategies intentionally.
+- Matching elements across refreshes is heuristic.
+  - Mitigation: prefer semantic fields (`automation_id`, `class_name`, `name`, control type, native handle) and use ordinal only as a duplicate tie-breaker.
 
 ## Migration Plan
 

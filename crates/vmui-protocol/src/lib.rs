@@ -158,6 +158,8 @@ pub struct WindowState {
     pub process_name: Option<String>,
     pub title: String,
     pub bounds: Rect,
+    pub backend: BackendKind,
+    pub confidence: f32,
     pub root: ElementNode,
 }
 

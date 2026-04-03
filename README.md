@@ -13,15 +13,18 @@ This repository is intentionally scaffolded for agent-driven development:
 - resync falls back to `snapshot_resync` plus refreshed snapshot instead of screenshot polling;
 - action artifacts are persisted into the in-VM artifact store before clients read them back;
 - Windows-specific automation is isolated behind a dedicated backend crate;
+- the Windows backend now performs UIA-first window/tree reads and event-driven targeted refresh;
+- WinEvent and MSAA are wired as refresh hints/fallback sources with explicit provenance in state;
+- window and element identity now uses session-stable rebinding plus semantic locators instead of raw ordinal-only paths;
 - MCP is planned as a thin proxy, not as the core transport;
-- the current codebase is a compileable skeleton, not a completed UIA implementation.
+- semantic actions and 1C-specific diagnostic workflows are still pending.
 
 ## Workspace Layout
 
 - `crates/vmui-protocol`: shared domain and transport models.
 - `crates/vmui-core`: config, session registry and UI state cache skeleton.
 - `crates/vmui-platform`: backend trait used by the daemon.
-- `crates/vmui-platform-windows`: Windows UI backend placeholder for UIA/WinEvent/MSAA.
+- `crates/vmui-platform-windows`: Windows UI backend with interactive-session gating, UIA snapshot reads and WinEvent/MSAA refresh integration.
 - `crates/vmui-transport-grpc`: generated protobuf/tonic types and conversion layer.
 - `crates/vmui-agent`: in-VM daemon entrypoint.
 - `crates/vmui-mcp-proxy`: external MCP adapter scaffold.
@@ -60,7 +63,6 @@ Useful commands:
 
 ## Next Implementation Slice
 
-1. Implement the Windows backend observer thread and event normalization.
-2. Replace the placeholder backend snapshot with UIA/WinEvent/MSAA-backed state.
-3. Add semantic action execution beyond the current placeholder backend result path.
-4. Add 1C-specific locator profiles and diagnostic workflows.
+1. Add semantic action execution beyond the current unsupported backend action path.
+2. Add 1C-specific locator profiles and diagnostic workflows.
+3. Add MCP bridge hardening and runtime policies.

@@ -9,6 +9,7 @@ After the daemon contract exists, the next blocking gap is the lack of live Wind
 - Implement the first Windows backend observer that runs inside the interactive VM session.
 - Use UI Automation as the primary source of tree and property data, with WinEvent and MSAA/IAccessible as fallback inputs.
 - Normalize backend events into targeted refreshes and diff batches for the daemon state cache.
+- Add session-stable window/element identity plus reusable locators instead of raw ordinal-only paths.
 - Record backend provenance and confidence so later action and 1C diagnostic layers know when fallback behavior is in play.
 
 ## Impact
