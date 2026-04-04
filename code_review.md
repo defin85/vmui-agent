@@ -23,10 +23,11 @@ Use this checklist for `/review`, manual review, or acceptance checks in this re
 ## Tests And Verification
 
 - The smallest relevant tests were added or updated when behavior changed.
+- `./scripts/check-agent-docs.sh`
 - `cargo fmt --all --check`
 - `cargo check --workspace`
 - `cargo test --workspace`
-- `openspec validate --strict --no-interactive` if `openspec/` changed
+- `openspec validate --all --strict --no-interactive` if `openspec/` changed
 
 ## Documentation Freshness
 

@@ -4,6 +4,8 @@
 
 - `README.md`: short product summary and high-level repository status.
 - `docs/dev-runbook.md`: canonical run, verification, and Codex setup notes.
+- `docs/codex-workflow.md`: canonical search, verification, OpenSpec, and tracking workflow.
+- `docs/codex-setup.md`: local tool readiness, doctor flow, and optional Codex config notes.
 - `docs/architecture.md`: runtime shape, crate boundaries, and fallback model.
 - `docs/protocol.md`: session flow, action semantics, and artifact policy.
 - `docs/roadmap.md`: delivery phases and release gates.
@@ -31,13 +33,16 @@
 ## Verification
 
 - Fast path:
+  `./scripts/check-agent-docs.sh`
   `cargo fmt --all --check`
   `cargo check --workspace`
   `cargo test --workspace`
 - Optional shortcut:
   `just ci`
+  `just doctor`
 - If you changed `openspec/`:
-  `openspec validate --strict --no-interactive`
+  `openspec validate --all --strict --no-interactive`
+  or `openspec validate <change-id> --strict --no-interactive`
 
 ## Planning And Tracking
 
@@ -55,7 +60,9 @@
   `AGENTS.md`
 - Layer-specific instructions:
   `crates/vmui-agent/AGENTS.md`
+  `crates/vmui-core/AGENTS.md`
   `crates/vmui-platform-windows/AGENTS.md`
+  `crates/vmui-transport-grpc/AGENTS.md`
   `proto/AGENTS.md`
 - Review checklist:
   `code_review.md`
@@ -63,3 +70,7 @@
   `.agents/skills/`
 - Optional project-local Codex config:
   `.codex/config.toml`
+- Local setup helper:
+  `scripts/doctor.sh`
+- Agent-facing docs guard:
+  `scripts/check-agent-docs.sh`

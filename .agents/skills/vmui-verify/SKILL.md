@@ -12,8 +12,9 @@ description: Run the canonical verification flow for vmui-agent after documentat
 
 ## Workflow
 
-1. Run `cargo fmt --all --check`.
-2. Run `cargo check --workspace`.
-3. Run `cargo test --workspace`.
-4. If `openspec/` changed, run `openspec validate --strict --no-interactive`.
-5. Report exact command results and any skipped steps.
+1. Run `./scripts/check-agent-docs.sh`.
+2. Run `cargo fmt --all --check`.
+3. Run `cargo check --workspace`.
+4. Run `cargo test --workspace`.
+5. If `openspec/` changed, run `openspec validate --all --strict --no-interactive`, or `openspec validate <change-id> --strict --no-interactive` when validating one change in isolation.
+6. Report exact command results and any skipped steps.

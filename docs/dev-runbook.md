@@ -7,9 +7,13 @@
 - Workspace minimum Rust version:
   `1.82`
 - Canonical commands are `cargo ...`; `just ci` is only a local convenience wrapper.
+- Run `./scripts/doctor.sh` on a new machine before assuming the repository setup is broken.
+- If `just` is installed locally, `just doctor` runs the same readiness check.
 
 ## Verification
 
+- Agent-facing docs freshness:
+  `./scripts/check-agent-docs.sh`
 - Format check:
   `cargo fmt --all --check`
 - Build check:
@@ -17,7 +21,8 @@
 - Test suite:
   `cargo test --workspace`
 - OpenSpec validation when `openspec/` changes:
-  `openspec validate --strict --no-interactive`
+  `openspec validate --all --strict --no-interactive`
+  or `openspec validate <change-id> --strict --no-interactive`
 
 ## Running The Daemon
 
@@ -56,6 +61,7 @@
 
 ## Codex Setup
 
+- For the end-to-end Codex workflow, read `docs/codex-workflow.md` and `docs/codex-setup.md`.
 - `.codex/config.toml` is an optional local optimization layer, not a required part of the repository runtime.
 - The checked-in config assumes a machine with local `claude-context`, Ollama, and Milvus services.
 - If that stack is unavailable, either disable the MCP entry or replace it with a setup available on the current machine.

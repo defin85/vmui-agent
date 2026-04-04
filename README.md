@@ -6,6 +6,8 @@ Start with:
 
 - `docs/index.md` for the repository map and edit routing.
 - `docs/dev-runbook.md` for run, verification, and Codex-specific setup notes.
+- `docs/codex-workflow.md` for the canonical search, verification, OpenSpec, and tracking workflow.
+- `docs/codex-setup.md` for local tool readiness and optional Codex config details.
 
 ## Current Status
 
@@ -43,10 +45,13 @@ This repository is intentionally scaffolded for agent-driven development:
 
 ## Development Commands
 
+- `./scripts/doctor.sh`
+- `./scripts/check-agent-docs.sh`
 - `cargo fmt --all --check`
 - `cargo check --workspace`
 - `cargo test --workspace`
 - `just ci` if `just` is installed locally
+- `just doctor` if `just` is installed locally
 
 ## Design Constraints
 
@@ -65,7 +70,8 @@ Useful commands:
 
 - `openspec list`
 - `openspec list --specs`
-- `openspec validate --strict --no-interactive`
+- `openspec validate --all --strict --no-interactive`
+- `openspec validate <change-id> --strict --no-interactive`
 - `bd ready --json`
 - `bd status`
 

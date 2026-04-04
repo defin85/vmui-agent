@@ -22,6 +22,10 @@ jobs:
       - name: Set default toolchain
         run: rustup default stable
 
+      - name: Check agent-facing docs
+        shell: bash
+        run: ./scripts/check-agent-docs.sh
+
       - name: cargo fmt --check
         run: cargo fmt --all --check
 
