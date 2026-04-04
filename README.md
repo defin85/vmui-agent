@@ -2,6 +2,11 @@
 
 Rust workspace for a stateful Windows UI agent that runs inside a dedicated Windows 10 VM and supports 1C UI diagnostics, Configurator navigation, and post-failure investigation around standard 1C automated testing.
 
+Start with:
+
+- `docs/index.md` for the repository map and edit routing.
+- `docs/dev-runbook.md` for run, verification, and Codex-specific setup notes.
+
 ## Current Status
 
 This repository is intentionally scaffolded for agent-driven development:
@@ -16,8 +21,9 @@ This repository is intentionally scaffolded for agent-driven development:
 - the Windows backend now performs UIA-first window/tree reads and event-driven targeted refresh;
 - WinEvent and MSAA are wired as refresh hints/fallback sources with explicit provenance in state;
 - window and element identity now uses session-stable rebinding plus semantic locators instead of raw ordinal-only paths;
-- MCP is planned as a thin proxy, not as the core transport;
-- semantic actions and 1C-specific diagnostic workflows are still pending.
+- semantic action execution is implemented in the daemon and Windows backend;
+- MCP remains a thin proxy and the current `vmui-mcp-proxy` binary is still a scaffold;
+- 1C-specific diagnostic workflows and MCP bridge hardening are still pending.
 
 ## Workspace Layout
 
@@ -28,17 +34,19 @@ This repository is intentionally scaffolded for agent-driven development:
 - `crates/vmui-transport-grpc`: generated protobuf/tonic types and conversion layer.
 - `crates/vmui-agent`: in-VM daemon entrypoint.
 - `crates/vmui-mcp-proxy`: external MCP adapter scaffold.
-- `proto/vmui/v1/agent.proto`: canonical wire contract draft.
+- `proto/vmui/v1/agent.proto`: canonical wire contract.
 - `docs/architecture.md`: recommended runtime architecture.
 - `docs/protocol.md`: API semantics and message flow.
 - `docs/roadmap.md`: MVP to production rollout.
+- `docs/index.md`: onboarding index for agents and contributors.
+- `docs/dev-runbook.md`: run and verification workflow.
 
 ## Development Commands
 
-- `cargo fmt --all`
+- `cargo fmt --all --check`
 - `cargo check --workspace`
 - `cargo test --workspace`
-- `just ci`
+- `just ci` if `just` is installed locally
 
 ## Design Constraints
 
@@ -61,8 +69,8 @@ Useful commands:
 - `bd ready --json`
 - `bd status`
 
-## Next Implementation Slice
+## Current Planned Work
 
-1. Add semantic action execution beyond the current unsupported backend action path.
-2. Add 1C-specific locator profiles and diagnostic workflows.
-3. Add MCP bridge hardening and runtime policies.
+- Active capability work lives under `openspec/changes/`.
+- Use `openspec list` for the current approved change queue.
+- Use `bd ready --json` for the current executable task queue.

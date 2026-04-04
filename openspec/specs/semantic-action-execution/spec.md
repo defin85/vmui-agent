@@ -1,7 +1,8 @@
 # semantic-action-execution Specification
 
 ## Purpose
-TBD - created by archiving change add-03-semantic-actions-and-artifacts. Update Purpose after archive.
+Define semantic-first action handling, daemon-side wait execution, and explicit action outcomes for supported and unsupported paths.
+
 ## Requirements
 ### Requirement: Semantic-first action execution
 
@@ -32,4 +33,3 @@ The system SHALL return explicit action outcomes for success, failure, timeout, 
 - **WHEN** the client requests an action that the current backend cannot execute safely
 - **THEN** the daemon returns an explicit unsupported or failed action result
 - **AND** the result includes enough detail for later diagnostics
-

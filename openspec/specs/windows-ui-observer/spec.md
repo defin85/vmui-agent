@@ -1,7 +1,8 @@
 # windows-ui-observer Specification
 
 ## Purpose
-TBD - created by archiving change add-02-windows-ui-observer. Update Purpose after archive.
+Define the Windows observation backend as interactive-session-only, UIA-first, event-driven, and explicit about fallback provenance.
+
 ## Requirements
 ### Requirement: Interactive Windows observation
 
@@ -60,4 +61,3 @@ The system SHALL expose session-stable window and element identifiers together w
 - **THEN** the backend keeps the existing session id for the matched window and element
 - **AND** the locator uses semantic fields such as control type, class name, automation id, and name
 - **AND** sibling ordinal is used only as a duplicate tie-breaker
-

@@ -1,7 +1,8 @@
 # artifact-capture Specification
 
 ## Purpose
-TBD - created by archiving change add-03-semantic-actions-and-artifacts. Update Purpose after archive.
+Define explicit artifact capture, OCR fallback behavior, and the rule that screenshots remain optional artifacts rather than the primary transport.
+
 ## Requirements
 ### Requirement: Explicit artifact capture
 
@@ -31,4 +32,3 @@ The system SHALL not require screenshot polling for ordinary client interaction.
 - **WHEN** the client needs to observe ongoing UI changes
 - **THEN** the daemon provides state updates through snapshot and diff delivery
 - **AND** screenshots remain optional artifacts rather than the primary transport
-

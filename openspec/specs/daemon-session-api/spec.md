@@ -1,7 +1,8 @@
 # daemon-session-api Specification
 
 ## Purpose
-TBD - created by archiving change add-01-daemon-session-foundation. Update Purpose after archive.
+Define the long-lived daemon session contract, including handshake, mode negotiation, and artifact delivery boundaries.
+
 ## Requirements
 ### Requirement: Long-lived daemon session
 
@@ -31,4 +32,3 @@ The system SHALL let the client request the intended operating mode during sessi
 
 - **WHEN** a client starts a session and requests Configurator mode
 - **THEN** the daemon acknowledges the requested mode or returns an explicit warning if that mode cannot be honored
-

@@ -1,3 +1,8 @@
+# Optional local Codex overrides for this repository.
+# This file assumes a machine with local claude-context, Ollama, and Milvus.
+# If that stack is unavailable, treat this config as an optimization layer and
+# replace or disable the MCP entry instead of assuming the repository is broken.
+
 [mcp_servers.claude-context]
 command = "bash"
 # Prefer repo-pinned Node 20, but keep claude-context usable on machines where only Node 22 is installed in nvm.
