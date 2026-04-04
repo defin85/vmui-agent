@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs,
     path::{Path, PathBuf},
 };
@@ -154,7 +154,10 @@ pub enum StateError {
 pub struct SessionRecord {
     pub runtime: SessionRuntime,
     pub state: UiStateStore,
+    recent_diffs: VecDeque<UiDiffBatch>,
 }
+
+const MAX_RECENT_DIFFS: usize = 16;
 
 #[derive(Default)]
 pub struct SessionRegistry {
@@ -168,6 +171,7 @@ impl SessionRegistry {
             SessionRecord {
                 runtime,
                 state: UiStateStore::default(),
+                recent_diffs: VecDeque::new(),
             },
         );
     }
@@ -197,6 +201,7 @@ impl SessionRegistry {
             .ok_or_else(|| SessionError::NotFound(session_id.clone()))?;
         record.runtime.last_revision = Some(snapshot.rev);
         record.state.replace_snapshot(snapshot);
+        record.recent_diffs.clear();
         Ok(())
     }
 
@@ -211,6 +216,10 @@ impl SessionRegistry {
             .ok_or_else(|| SessionError::NotFound(session_id.clone()))?;
         record.state.apply_diff(diff).map_err(SessionError::State)?;
         record.runtime.last_revision = Some(record.state.revision());
+        if record.recent_diffs.len() == MAX_RECENT_DIFFS {
+            record.recent_diffs.pop_front();
+        }
+        record.recent_diffs.push_back(diff.clone());
         Ok(())
     }
 
@@ -229,6 +238,12 @@ impl SessionRegistry {
 
     pub fn state(&self, session_id: &SessionId) -> Option<&UiStateStore> {
         self.sessions.get(session_id).map(|record| &record.state)
+    }
+
+    pub fn recent_diffs(&self, session_id: &SessionId) -> Option<Vec<UiDiffBatch>> {
+        self.sessions
+            .get(session_id)
+            .map(|record| record.recent_diffs.iter().cloned().collect())
     }
 
     pub fn len(&self) -> usize {
@@ -924,6 +939,38 @@ mod tests {
         assert_eq!(runtime.last_revision, Some(10));
         assert!(runtime.subscribed_at.is_some());
         assert!(runtime.closed_at.is_some());
+    }
+
+    #[test]
+    fn session_registry_keeps_recent_diffs_for_diagnostics() {
+        let session_id = SessionId::new("sess");
+        let mut registry = SessionRegistry::default();
+        registry.open_session(SessionRuntime::new(
+            session_id.clone(),
+            SessionMode::EnterpriseUi,
+            "test-backend",
+        ));
+        registry
+            .apply_snapshot(&session_id, snapshot(session_id.clone(), 3))
+            .expect("snapshot must apply");
+
+        let diff = UiDiffBatch {
+            base_rev: 3,
+            new_rev: 4,
+            emitted_at: Utc::now(),
+            ops: vec![DiffOp::FocusChanged {
+                window_id: WindowId::from("wnd-1"),
+                element_id: Some(ElementId::from("elt-child")),
+            }],
+        };
+
+        registry
+            .apply_diff(&session_id, &diff)
+            .expect("diff must apply");
+
+        let recent = registry.recent_diffs(&session_id).expect("recent diffs");
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0], diff);
     }
 
     #[test]

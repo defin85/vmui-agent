@@ -24,8 +24,10 @@ This repository is intentionally scaffolded for agent-driven development:
 - WinEvent and MSAA are wired as refresh hints/fallback sources with explicit provenance in state;
 - window and element identity now uses session-stable rebinding plus semantic locators instead of raw ordinal-only paths;
 - semantic action execution is implemented in the daemon and Windows backend;
+- explicit 1C `enterprise_ui` and `configurator` modes now filter tracked windows and annotate 1C-specific profiles/fallback expectations;
+- post-failure 1C diagnostic bundles now capture current state, recent diffs, baseline comparison, and targeted artifacts while preserving the original external test verdict;
 - MCP remains a thin proxy and the current `vmui-mcp-proxy` binary is still a scaffold;
-- 1C-specific diagnostic workflows and MCP bridge hardening are still pending.
+- MCP bridge hardening is still pending.
 
 ## Workspace Layout
 

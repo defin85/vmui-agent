@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     ffi::c_void,
     mem::ManuallyDrop,
+    path::Path,
     ptr,
     sync::{Mutex, OnceLock},
     thread,
@@ -21,9 +22,9 @@ use vmui_protocol::{
     WindowLocator, WindowState,
 };
 use windows::{
-    core::{Interface, BOOL, BSTR},
+    core::{Interface, BOOL, BSTR, PWSTR},
     Win32::{
-        Foundation::{HWND, LPARAM, RECT, RPC_E_CHANGED_MODE, WPARAM},
+        Foundation::{CloseHandle, HWND, LPARAM, RECT, RPC_E_CHANGED_MODE, WPARAM},
         Graphics::Gdi::{
             BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
             GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
@@ -37,7 +38,10 @@ use windows::{
             StationsAndDesktops::{
                 CloseDesktop, OpenInputDesktop, DESKTOP_READOBJECTS, DESKTOP_SWITCHDESKTOP,
             },
-            Threading::GetCurrentThreadId,
+            Threading::{
+                GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+            },
             Variant::{VariantClear, VARIANT, VARIANT_0_0, VARIANT_0_0_0, VT_I4},
         },
         UI::{
@@ -59,21 +63,21 @@ use windows::{
                 VK_DOWN, VK_ESCAPE, VK_F4, VK_LEFT, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
             },
             WindowsAndMessaging::{
-                EnumWindows, GetMessageW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
-                IsWindowVisible, PostThreadMessageW, SetCursorPos, SetForegroundWindow,
-                CHILDID_SELF, EVENT_OBJECT_FOCUS, EVENT_OBJECT_HIDE, EVENT_OBJECT_NAMECHANGE,
-                EVENT_OBJECT_SELECTION, EVENT_OBJECT_SHOW, EVENT_OBJECT_STATECHANGE,
-                EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, MSG, OBJID_CLIENT,
-                WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_QUIT,
+                EnumWindows, GetClassNameW, GetMessageW, GetWindowRect, GetWindowTextW,
+                GetWindowThreadProcessId, IsWindowVisible, PostThreadMessageW, SetCursorPos,
+                SetForegroundWindow, CHILDID_SELF, EVENT_OBJECT_FOCUS, EVENT_OBJECT_HIDE,
+                EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_SELECTION, EVENT_OBJECT_SHOW,
+                EVENT_OBJECT_STATECHANGE, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, MSG,
+                OBJID_CLIENT, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_QUIT,
             },
         },
     },
 };
 
 use super::{
-    element_id_from_locator, normalize_for_key, normalize_optional_for_key,
-    window_id_from_fingerprint, HintSource, ObservationSource, RefreshRequest, RefreshScope,
-    RefreshSubscription,
+    element_id_from_locator, matches_onec_metadata_hint, normalize_for_key,
+    normalize_optional_for_key, window_id_from_fingerprint, HintSource, ObservationSource,
+    RefreshRequest, RefreshScope, RefreshSubscription,
 };
 
 static HOOK_SENDERS: OnceLock<Mutex<BTreeMap<isize, mpsc::UnboundedSender<RefreshRequest>>>> =
@@ -107,8 +111,19 @@ impl ObservationSource for WindowsObservationSource {
         let hwnds = enumerate_windows()?;
         let mut windows = Vec::new();
 
-        for hwnd in hwnds {
-            if let Some(window) = self.capture_window(params, hwnd, HintSource::Uia)? {
+        for raw_hwnd in hwnds {
+            let hwnd = HWND(raw_hwnd as *mut c_void);
+            let metadata = match read_window_metadata(hwnd)? {
+                Some(metadata) => metadata,
+                None => continue,
+            };
+            if !should_capture_window_for_mode(params, &metadata) {
+                continue;
+            }
+
+            if let Some(window) =
+                capture_window_from_metadata(params, hwnd, &metadata, HintSource::Uia)?
+            {
                 windows.push(window);
             }
         }
@@ -127,18 +142,11 @@ impl ObservationSource for WindowsObservationSource {
             Some(metadata) => metadata,
             None => return Ok(None),
         };
-        let max_depth = if params.shallow { 1 } else { 4 };
-
-        match capture_uia_window(hwnd, &metadata, max_depth, hint) {
-            Ok(window) => Ok(Some(window)),
-            Err(uia_error) => match capture_msaa_window(hwnd, &metadata) {
-                Ok(Some(window)) => Ok(Some(window)),
-                Ok(None) => Err(uia_error),
-                Err(msaa_error) => Err(anyhow!(
-                    "UIA capture failed: {uia_error}; MSAA fallback failed: {msaa_error}"
-                )),
-            },
+        if !should_capture_window_for_mode(params, &metadata) {
+            return Ok(None);
         }
+
+        capture_window_from_metadata(params, hwnd, &metadata, hint)
     }
 
     fn subscribe(
@@ -185,7 +193,9 @@ pub fn interactive_desktop_available() -> bool {
 struct WindowMetadata {
     hwnd: usize,
     pid: u32,
+    process_name: Option<String>,
     title: String,
+    class_name: Option<String>,
     bounds: Rect,
 }
 
@@ -248,14 +258,82 @@ fn read_window_metadata(hwnd: HWND) -> Result<Option<WindowMetadata>> {
 
         let mut pid = 0u32;
         let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let process_name = read_process_name(pid);
+        let class_name = read_window_class_name(hwnd);
 
         Ok(Some(WindowMetadata {
             hwnd: hwnd.0 as usize,
             pid,
+            process_name,
             title,
+            class_name,
             bounds,
         }))
     }
+}
+
+fn should_capture_window_for_mode(
+    params: &vmui_platform::BackendSessionParams,
+    metadata: &WindowMetadata,
+) -> bool {
+    matches_onec_metadata_hint(
+        metadata.process_name.as_deref(),
+        metadata.title.as_str(),
+        metadata.class_name.as_deref(),
+        &params.mode,
+    )
+}
+
+fn capture_window_from_metadata(
+    params: &vmui_platform::BackendSessionParams,
+    hwnd: HWND,
+    metadata: &WindowMetadata,
+    hint: HintSource,
+) -> Result<Option<WindowState>> {
+    let max_depth = if params.shallow { 1 } else { 4 };
+
+    match capture_uia_window(hwnd, metadata, max_depth, hint) {
+        Ok(window) => Ok(Some(window)),
+        Err(uia_error) => match capture_msaa_window(hwnd, metadata) {
+            Ok(Some(window)) => Ok(Some(window)),
+            Ok(None) => Err(uia_error),
+            Err(msaa_error) => Err(anyhow!(
+                "UIA capture failed: {uia_error}; MSAA fallback failed: {msaa_error}"
+            )),
+        },
+    }
+}
+
+fn read_window_class_name(hwnd: HWND) -> Option<String> {
+    let mut class_buffer = [0u16; 256];
+    let class_len = unsafe { GetClassNameW(hwnd, &mut class_buffer) };
+    (class_len > 0).then(|| String::from_utf16_lossy(&class_buffer[..class_len as usize]))
+}
+
+fn read_process_name(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut buffer = vec![0u16; 260];
+    let mut len = buffer.len() as u32;
+    let query_result = unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut len,
+        )
+    };
+    let _ = unsafe { CloseHandle(handle) };
+    query_result.ok()?;
+
+    let full_path = String::from_utf16_lossy(&buffer[..len as usize]);
+    Path::new(&full_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
 }
 
 fn capture_uia_window(
@@ -284,7 +362,7 @@ fn capture_uia_window(
     Ok(WindowState {
         window_id: window_id_from_fingerprint(&window_fingerprint),
         pid: metadata.pid,
-        process_name: None,
+        process_name: metadata.process_name.clone(),
         title,
         bounds: metadata.bounds,
         backend: BackendKind::Uia,
@@ -413,7 +491,7 @@ fn capture_msaa_window(hwnd: HWND, metadata: &WindowMetadata) -> Result<Option<W
         parent_id: None,
         backend: BackendKind::Msaa,
         control_type: role_name.clone(),
-        class_name: None,
+        class_name: metadata.class_name.clone(),
         name,
         automation_id: None,
         native_window_handle: Some(metadata.hwnd as u64),
@@ -438,7 +516,7 @@ fn capture_msaa_window(hwnd: HWND, metadata: &WindowMetadata) -> Result<Option<W
     Ok(Some(WindowState {
         window_id: window_id_from_fingerprint(&window_fingerprint),
         pid: metadata.pid,
-        process_name: None,
+        process_name: metadata.process_name.clone(),
         title,
         bounds: metadata.bounds,
         backend: BackendKind::Msaa,
@@ -597,7 +675,8 @@ pub(super) fn perform_action(action: ActionRequest) -> Result<BackendActionResul
         ActionKind::ListWindows
         | ActionKind::GetTree(_)
         | ActionKind::WaitFor(_)
-        | ActionKind::WriteArtifact(_) => Ok(super::unsupported_action(
+        | ActionKind::WriteArtifact(_)
+        | ActionKind::CollectDiagnosticBundle(_) => Ok(super::unsupported_action(
             action,
             "this action is handled by the daemon state executor",
         )),

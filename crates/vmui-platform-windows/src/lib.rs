@@ -17,8 +17,8 @@ use vmui_platform::{
     UiBackend,
 };
 use vmui_protocol::{
-    ActionRequest, ActionStatus, DiffOp, ElementId, ElementNode, LocatorSegment, UiDiffBatch,
-    UiSnapshot, WindowId, WindowState,
+    ActionRequest, ActionStatus, DiffOp, ElementId, ElementNode, LocatorSegment, PropertyValue,
+    SessionMode, UiDiffBatch, UiSnapshot, WindowId, WindowState,
 };
 
 pub struct WindowsBackend {
@@ -386,8 +386,9 @@ fn sort_windows(windows: &mut [WindowState]) {
 fn snapshot_from_windows(
     params: &BackendSessionParams,
     rev: u64,
-    mut windows: Vec<WindowState>,
+    windows: Vec<WindowState>,
 ) -> UiSnapshot {
+    let mut windows = prepare_windows(params, windows);
     sort_windows(&mut windows);
     UiSnapshot {
         session_id: params.session_id.clone(),
@@ -396,6 +397,290 @@ fn snapshot_from_windows(
         captured_at: Utc::now(),
         windows,
     }
+}
+
+fn prepare_windows(params: &BackendSessionParams, windows: Vec<WindowState>) -> Vec<WindowState> {
+    windows
+        .into_iter()
+        .filter_map(|mut window| {
+            if !matches_onec_mode(&window, &params.mode) {
+                return None;
+            }
+            annotate_onec_window(&mut window, &params.mode);
+            Some(window)
+        })
+        .collect()
+}
+
+fn matches_onec_mode(window: &WindowState, mode: &SessionMode) -> bool {
+    let onec_like = is_onec_process(window.process_name.as_deref())
+        || looks_like_onec_window(window)
+        || tree_has_v8_surface(&window.root);
+    if !onec_like {
+        return false;
+    }
+
+    match mode {
+        SessionMode::EnterpriseUi => !looks_like_configurator_window(window),
+        SessionMode::Configurator => looks_like_configurator_window(window),
+    }
+}
+
+#[cfg_attr(not(any(test, windows)), allow(dead_code))]
+fn matches_onec_metadata_hint(
+    process_name: Option<&str>,
+    title: &str,
+    class_name: Option<&str>,
+    mode: &SessionMode,
+) -> bool {
+    let onec_like = is_onec_process(process_name)
+        || text_has_any(
+            title,
+            &[
+                "1c",
+                "1с",
+                "enterprise",
+                "предприятие",
+                "configurator",
+                "конфигуратор",
+            ],
+        )
+        || class_name.map(is_v8_class).unwrap_or(false);
+
+    if !onec_like {
+        return false;
+    }
+
+    let configurator_hint = matches!(
+        process_name.map(normalize_for_key).as_deref(),
+        Some("1cv8c.exe")
+    ) || text_has_any(title, &["configurator", "конфигуратор"]);
+
+    match mode {
+        SessionMode::EnterpriseUi => !configurator_hint,
+        SessionMode::Configurator => configurator_hint,
+    }
+}
+
+fn is_onec_process(process_name: Option<&str>) -> bool {
+    matches!(
+        process_name.map(normalize_for_key).as_deref(),
+        Some("1cv8.exe") | Some("1cv8c.exe") | Some("1cv8s.exe")
+    )
+}
+
+fn looks_like_onec_window(window: &WindowState) -> bool {
+    text_has_any(
+        &window.title,
+        &[
+            "1c",
+            "1с",
+            "enterprise",
+            "предприятие",
+            "configurator",
+            "конфигуратор",
+        ],
+    ) || window
+        .root
+        .name
+        .as_deref()
+        .map(|name| {
+            text_has_any(
+                name,
+                &[
+                    "1c",
+                    "1с",
+                    "enterprise",
+                    "предприятие",
+                    "configurator",
+                    "конфигуратор",
+                ],
+            )
+        })
+        .unwrap_or(false)
+        || window
+            .root
+            .class_name
+            .as_deref()
+            .map(is_v8_class)
+            .unwrap_or(false)
+}
+
+fn looks_like_configurator_window(window: &WindowState) -> bool {
+    text_has_any(&window.title, &["configurator", "конфигуратор"])
+        || window
+            .root
+            .name
+            .as_deref()
+            .map(|name| text_has_any(name, &["configurator", "конфигуратор"]))
+            .unwrap_or(false)
+        || tree_has_profile_hint(
+            &window.root,
+            &["metadata", "метаданные", "designer", "designer tree"],
+        )
+}
+
+fn annotate_onec_window(window: &mut WindowState, mode: &SessionMode) {
+    let window_profile = if looks_like_configurator_window(window) {
+        "configurator_window"
+    } else {
+        "ordinary_form_window"
+    };
+    window.root.properties.insert(
+        "onec_mode".to_owned(),
+        PropertyValue::String(match mode {
+            SessionMode::EnterpriseUi => "enterprise_ui".to_owned(),
+            SessionMode::Configurator => "configurator".to_owned(),
+        }),
+    );
+    window.root.properties.insert(
+        "onec_window_profile".to_owned(),
+        PropertyValue::String(window_profile.to_owned()),
+    );
+
+    if let Some(reason) = fallback_reason_for_node(&window.root) {
+        window.root.properties.insert(
+            "onec_fallback_reason".to_owned(),
+            PropertyValue::String(reason.to_owned()),
+        );
+    }
+
+    annotate_onec_node(&mut window.root, mode, window_profile);
+}
+
+fn annotate_onec_node(node: &mut ElementNode, mode: &SessionMode, window_profile: &str) {
+    node.properties.insert(
+        "onec_mode".to_owned(),
+        PropertyValue::String(match mode {
+            SessionMode::EnterpriseUi => "enterprise_ui".to_owned(),
+            SessionMode::Configurator => "configurator".to_owned(),
+        }),
+    );
+    node.properties.insert(
+        "onec_window_profile".to_owned(),
+        PropertyValue::String(window_profile.to_owned()),
+    );
+
+    if let Some(profile) = onec_profile_for_node(node, window_profile) {
+        node.properties.insert(
+            "onec_profile".to_owned(),
+            PropertyValue::String(profile.to_owned()),
+        );
+    }
+
+    if let Some(reason) = fallback_reason_for_node(node) {
+        node.properties.insert(
+            "onec_fallback_reason".to_owned(),
+            PropertyValue::String(reason.to_owned()),
+        );
+    }
+
+    for child in node.children.iter_mut() {
+        annotate_onec_node(child, mode, window_profile);
+    }
+}
+
+fn onec_profile_for_node(node: &ElementNode, window_profile: &str) -> Option<&'static str> {
+    let control_type = normalize_for_key(&node.control_type);
+    let class_name = node
+        .class_name
+        .as_deref()
+        .map(normalize_for_key)
+        .unwrap_or_default();
+    let name = node
+        .name
+        .as_deref()
+        .map(normalize_for_key)
+        .unwrap_or_default();
+
+    if control_type == "tree" && text_has_any(&name, &["metadata", "метаданные", "objects"])
+    {
+        return Some("configurator_metadata_tree");
+    }
+    if control_type == "edit"
+        && class_name.contains("v8")
+        && window_profile == "configurator_window"
+    {
+        return Some("configurator_text_editor");
+    }
+    if control_type == "edit" && class_name.contains("v8") {
+        return Some("ordinary_form_text_input");
+    }
+    if control_type == "pane" && class_name.contains("v8") {
+        return Some("ordinary_form_surface");
+    }
+    if control_type == "custom" && class_name.contains("v8") {
+        return Some("opaque_onec_surface");
+    }
+    if control_type == "window"
+        && class_name.contains("v8")
+        && window_profile == "configurator_window"
+    {
+        return Some("configurator_root");
+    }
+    if control_type == "window" && class_name.contains("v8") {
+        return Some("ordinary_form_root");
+    }
+
+    None
+}
+
+fn fallback_reason_for_node(node: &ElementNode) -> Option<&'static str> {
+    if node.backend != vmui_protocol::BackendKind::Uia {
+        return Some("fallback_backend");
+    }
+
+    let class_name = node
+        .class_name
+        .as_deref()
+        .map(normalize_for_key)
+        .unwrap_or_default();
+    let missing_semantics = node.name.is_none() && node.automation_id.is_none();
+    if class_name.contains("v8")
+        && missing_semantics
+        && matches!(
+            normalize_for_key(&node.control_type).as_str(),
+            "custom" | "pane" | "window"
+        )
+    {
+        return Some("weak_semantic_metadata");
+    }
+
+    if node.confidence < 0.6 {
+        return Some("low_confidence_surface");
+    }
+
+    None
+}
+
+fn tree_has_v8_surface(node: &ElementNode) -> bool {
+    node.class_name.as_deref().map(is_v8_class).unwrap_or(false)
+        || node.children.iter().any(tree_has_v8_surface)
+}
+
+fn tree_has_profile_hint(node: &ElementNode, hints: &[&str]) -> bool {
+    node.name
+        .as_deref()
+        .map(|name| text_has_any(name, hints))
+        .unwrap_or(false)
+        || node
+            .class_name
+            .as_deref()
+            .map(|class_name| text_has_any(class_name, hints))
+            .unwrap_or(false)
+        || node
+            .children
+            .iter()
+            .any(|child| tree_has_profile_hint(child, hints))
+}
+
+fn is_v8_class(class_name: &str) -> bool {
+    normalize_for_key(class_name).starts_with("v8")
+}
+
+fn text_has_any(value: &str, needles: &[&str]) -> bool {
+    let normalized = normalize_for_key(value);
+    needles.iter().any(|needle| normalized.contains(needle))
 }
 
 fn diff_snapshots(previous: &UiSnapshot, next: &UiSnapshot) -> Vec<DiffOp> {

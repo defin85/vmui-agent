@@ -319,6 +319,7 @@ pub enum ActionKind {
     CaptureRegion(CaptureOptions),
     OcrRegion(OcrOptions),
     WriteArtifact(WriteArtifactOptions),
+    CollectDiagnosticBundle(DiagnosticBundleOptions),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -389,6 +390,25 @@ pub struct OcrOptions {
 pub struct WriteArtifactOptions {
     pub kind: String,
     pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticStepVerdict {
+    Failed,
+    TimedOut,
+    Blocked,
+    Passed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DiagnosticBundleOptions {
+    pub step_id: Option<String>,
+    pub step_label: String,
+    pub test_verdict: DiagnosticStepVerdict,
+    pub note: Option<String>,
+    pub baseline_artifact_id: Option<ArtifactId>,
+    pub max_tree_depth: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

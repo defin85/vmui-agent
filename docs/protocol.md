@@ -36,7 +36,9 @@
 - `initial_snapshot` is the authoritative starting point for the client cache, even if the client asked to skip it.
 - `diff_batch` moves the client from `base_rev` to `new_rev`.
 - If the client misses revisions, the server emits `snapshot_resync` and follows it with a refreshed `initial_snapshot`.
+- Session mode scopes 1C observation to the intended surface family instead of broad desktop-wide automation.
 - Windows and elements carry backend provenance plus confidence so fallback-triggered refreshes stay explicit.
+- 1C-oriented snapshots can annotate windows and nodes with profile metadata such as `onec_window_profile`, `onec_profile`, and `onec_fallback_reason`.
 - WinEvent and MSAA are treated as refresh hints; the emitted snapshot/diff remains the source of truth.
 - Window and element ids are expected to stay stable across targeted refresh when the same semantic control is matched again.
 - Locator segments should contain semantic fields first, with sibling ordinal used only as a duplicate tie-breaker.
@@ -48,6 +50,7 @@
 - `get_tree.raw=true` returns the raw target object; `raw=false` wraps the target with contextual fields such as `window_id`.
 - Every action can emit artifacts.
 - `wait_for` is server-side and runs against the live cache plus backend events.
+- `collect_diagnostic_bundle` is server-side and complements standard 1C automated testing by preserving the original external test verdict together with daemon-side state, recent diffs, baseline comparison, and target-scoped artifacts.
 - `timeout_ms` applies both to daemon-side waits and backend action execution.
 - OCR requests are explicit and scoped to a region or window.
 - `capture_region` is explicit and scoped; `window_id + bounds` is interpreted as a window-relative region.
@@ -60,6 +63,8 @@
 - Expected artifact kinds:
   - `snapshot-json`
   - `diff-json`
+  - `diagnostic-json`
+  - `baseline-comparison-json`
   - `screenshot-png`
   - `screenshot-jpeg`
   - `ocr-json`

@@ -18,9 +18,10 @@ use vmui_platform::{
     BackendSessionParams, UiBackend,
 };
 use vmui_protocol::{
-    ActionId, ActionRequest, ActionStatus, ActionTarget, BackendKind, CapturePolicy, DiffOp,
-    ElementId, ElementLocator, ElementNode, ElementStates, Locator, Rect, SessionMode, TreeRequest,
-    UiDiffBatch, UiSnapshot, WaitCondition, WaitForOptions, WindowId, WindowLocator, WindowState,
+    ActionId, ActionRequest, ActionStatus, ActionTarget, ArtifactId, BackendKind, CapturePolicy,
+    DiagnosticBundleOptions, DiagnosticStepVerdict, DiffOp, ElementId, ElementLocator, ElementNode,
+    ElementStates, Locator, PropertyValue, Rect, SessionId, SessionMode, TreeRequest, UiDiffBatch,
+    UiSnapshot, WaitCondition, WaitForOptions, WindowId, WindowLocator, WindowState,
 };
 use vmui_transport_grpc::encode_action_request;
 use vmui_transport_grpc::pb::{self, client_msg, server_msg, ui_agent_client::UiAgentClient};
@@ -838,6 +839,242 @@ async fn get_tree_raw_flag_changes_artifact_shape() {
 }
 
 #[tokio::test]
+async fn collect_diagnostic_bundle_persists_bundle_diff_and_baseline_comparison() {
+    let dir = tempdir().expect("tempdir");
+    let backend = StubBackend::with_events_and_snapshots(
+        vec![BackendEvent::Diff(UiDiffBatch {
+            base_rev: 1,
+            new_rev: 2,
+            emitted_at: Utc
+                .timestamp_millis_opt(1_700_000_002_000)
+                .single()
+                .unwrap(),
+            ops: vec![DiffOp::PropertyChanged {
+                element_id: ElementId::from("elt-1"),
+                field: "onec_fallback_reason".to_owned(),
+                value: PropertyValue::String("weak_semantic_metadata".to_owned()),
+            }],
+        })],
+        [1],
+    );
+    let (mut client, shutdown, state) =
+        spawn_test_server_with_backend(dir.path().to_path_buf(), backend)
+            .await
+            .expect("spawn server");
+
+    let baseline_artifact_id = {
+        let mut baseline = sample_snapshot(
+            SessionId::from("sess-baseline"),
+            SessionMode::EnterpriseUi,
+            1,
+        );
+        baseline.windows[0].window_id = WindowId::from("wnd-baseline");
+        baseline.windows[0].root.element_id = ElementId::from("elt-baseline");
+        baseline.windows[0].root.locator.window_fingerprint = "1cv8.exe:1c:baseline".to_owned();
+        baseline.windows[0].root.native_window_handle = Some(77);
+        baseline.windows[0].root.children.push(sample_editor_node(
+            "1cv8.exe:1c:baseline",
+            "elt-baseline-editor",
+            "elt-baseline",
+            "Поиск",
+        ));
+        let bytes = serde_json::to_vec(&baseline).expect("baseline json");
+
+        let mut state = state.write().await;
+        state
+            .artifacts
+            .write_bytes(None, "snapshot-json", "application/json", &bytes)
+            .expect("write baseline artifact")
+            .artifact_id
+            .to_string()
+    };
+
+    let (outbound_tx, outbound_rx) = mpsc::channel(4);
+    outbound_tx
+        .send(pb::ClientMsg {
+            payload: Some(client_msg::Payload::Hello(pb::Hello {
+                client_name: "test".to_owned(),
+                client_version: "0.1.0".to_owned(),
+                requested_mode: pb::SessionMode::EnterpriseUi as i32,
+            })),
+        })
+        .await
+        .expect("send hello");
+    outbound_tx
+        .send(pb::ClientMsg {
+            payload: Some(client_msg::Payload::Subscribe(pb::Subscribe {
+                include_initial_snapshot: true,
+                include_diff_stream: true,
+                shallow: false,
+            })),
+        })
+        .await
+        .expect("send subscribe");
+
+    let response = client
+        .session(ReceiverStream::new(outbound_rx))
+        .await
+        .expect("session RPC");
+    let mut inbound = response.into_inner();
+    let _ = inbound.message().await.expect("ack read").expect("ack");
+    let _ = inbound
+        .message()
+        .await
+        .expect("snapshot read")
+        .expect("snapshot payload");
+    let _ = inbound
+        .message()
+        .await
+        .expect("diff read")
+        .expect("diff payload");
+
+    let action = encode_action_request(&ActionRequest {
+        action_id: ActionId::from("diag-1"),
+        timeout_ms: 2_000,
+        target: ActionTarget::Window(WindowLocator {
+            window_id: Some(WindowId::from("wnd-1")),
+            title: None,
+            pid: None,
+        }),
+        kind: domain::ActionKind::CollectDiagnosticBundle(DiagnosticBundleOptions {
+            step_id: Some("step-7".to_owned()),
+            step_label: "Открытие формы".to_owned(),
+            test_verdict: DiagnosticStepVerdict::Failed,
+            note: Some("runner=standard-1c".to_owned()),
+            baseline_artifact_id: Some(baseline_artifact_id.clone().into()),
+            max_tree_depth: Some(1),
+        }),
+        capture_policy: CapturePolicy::Never,
+    })
+    .expect("encode action");
+    outbound_tx
+        .send(pb::ClientMsg {
+            payload: Some(client_msg::Payload::ActionRequest(action)),
+        })
+        .await
+        .expect("send action");
+    drop(outbound_tx);
+
+    let result = inbound
+        .message()
+        .await
+        .expect("action result read")
+        .expect("action result payload");
+
+    let artifacts = match result.payload.expect("payload") {
+        server_msg::Payload::ActionResult(result) => {
+            assert!(result.ok);
+            assert_eq!(result.status, "completed");
+            assert!(result.message.contains("Открытие формы"));
+            result.artifacts
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    };
+
+    let diagnostic_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "diagnostic-json")
+        .expect("diagnostic artifact");
+    let diff_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "diff-json")
+        .expect("diff artifact");
+    let baseline_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "baseline-comparison-json")
+        .expect("baseline comparison artifact");
+
+    let diagnostic_json =
+        read_artifact_json(&mut client, diagnostic_artifact.artifact_id.clone()).await;
+    let diff_json = read_artifact_json(&mut client, diff_artifact.artifact_id.clone()).await;
+    let baseline_json =
+        read_artifact_json(&mut client, baseline_artifact.artifact_id.clone()).await;
+
+    assert_eq!(
+        diagnostic_json["diagnostic_context"]["test_verdict"],
+        serde_json::Value::String("failed".to_owned())
+    );
+    assert_eq!(
+        diagnostic_json["diagnostic_context"]["baseline_artifact_id"],
+        serde_json::Value::String(baseline_artifact_id)
+    );
+    assert!(diagnostic_json["target_tree"].is_object());
+    assert!(diagnostic_json["fallback_surfaces"].is_array());
+    assert_eq!(diff_json.as_array().map(Vec::len), Some(1));
+    assert_eq!(baseline_json["status"], "compared");
+    assert_eq!(baseline_json["matches"], false);
+    assert_eq!(
+        baseline_json["matched_windows"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        baseline_json["added_windows"].as_array().map(Vec::len),
+        Some(0)
+    );
+    assert_eq!(
+        baseline_json["removed_windows"].as_array().map(Vec::len),
+        Some(0)
+    );
+    assert_eq!(
+        baseline_json["changed_windows"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert!(baseline_json["changed_windows"][0]["changed_fields"]
+        .as_array()
+        .expect("changed_fields array")
+        .iter()
+        .any(|value| value == "tree_state"));
+
+    let _ = shutdown.send(());
+}
+
+#[test]
+fn compare_snapshots_matches_cross_session_windows_semantically() {
+    let mut expected = sample_snapshot(
+        SessionId::from("sess-expected"),
+        SessionMode::EnterpriseUi,
+        1,
+    );
+    expected.windows[0].window_id = WindowId::from("wnd-expected");
+    expected.windows[0].root.element_id = ElementId::from("elt-expected");
+    expected.windows[0].root.locator.window_fingerprint = "1cv8.exe:1c:expected".to_owned();
+    expected.windows[0].root.native_window_handle = Some(55);
+    expected.windows[0].root.children.push(sample_editor_node(
+        "1cv8.exe:1c:expected",
+        "elt-expected-editor",
+        "elt-expected",
+        "Поиск",
+    ));
+
+    let actual = sample_snapshot(SessionId::from("sess-actual"), SessionMode::EnterpriseUi, 1);
+
+    let comparison = compare_snapshots(&ArtifactId::from("artifact-baseline"), &expected, &actual);
+
+    assert_eq!(comparison["matches"], false);
+    assert_eq!(
+        comparison["matched_windows"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        comparison["added_windows"].as_array().map(Vec::len),
+        Some(0)
+    );
+    assert_eq!(
+        comparison["removed_windows"].as_array().map(Vec::len),
+        Some(0)
+    );
+    assert_eq!(
+        comparison["changed_windows"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert!(comparison["changed_windows"][0]["changed_fields"]
+        .as_array()
+        .expect("changed_fields array")
+        .iter()
+        .any(|value| value == "tree_state"));
+}
+
+#[tokio::test]
 async fn stale_diff_triggers_resync_event_and_snapshot_refresh() {
     let dir = tempdir().expect("tempdir");
     let backend = StubBackend::with_events_and_snapshots(
@@ -1068,5 +1305,53 @@ fn sample_snapshot(session_id: domain::SessionId, mode: SessionMode, rev: u64) -
                 confidence: 1.0,
             },
         }],
+    }
+}
+
+fn sample_editor_node(
+    window_fingerprint: &str,
+    element_id: &str,
+    parent_id: &str,
+    name: &str,
+) -> ElementNode {
+    ElementNode {
+        element_id: ElementId::from(element_id),
+        parent_id: Some(ElementId::from(parent_id)),
+        backend: BackendKind::Mixed,
+        control_type: "Edit".to_owned(),
+        class_name: Some("V8Edit".to_owned()),
+        name: Some(name.to_owned()),
+        automation_id: None,
+        native_window_handle: None,
+        bounds: Rect {
+            left: 16,
+            top: 24,
+            width: 120,
+            height: 28,
+        },
+        locator: Locator {
+            window_fingerprint: window_fingerprint.to_owned(),
+            path: vec![vmui_protocol::LocatorSegment {
+                control_type: "Edit".to_owned(),
+                class_name: Some("V8Edit".to_owned()),
+                automation_id: None,
+                name: Some(name.to_owned()),
+                sibling_ordinal: None,
+            }],
+        },
+        properties: BTreeMap::from([(
+            "onec_profile".to_owned(),
+            PropertyValue::String("ordinary_form_text_input".to_owned()),
+        )]),
+        states: ElementStates {
+            enabled: true,
+            visible: true,
+            focused: false,
+            selected: false,
+            expanded: false,
+            toggled: false,
+        },
+        children: Vec::new(),
+        confidence: 0.9,
     }
 }

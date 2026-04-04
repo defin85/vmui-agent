@@ -57,10 +57,10 @@ fn non_windows_backend_reports_unavailable() {
 async fn targeted_refresh_uses_window_scope_without_full_rescan() {
     let (refresh_tx, refresh_rx) = mpsc::unbounded_channel();
     let initial_windows = vec![
-        sample_window(0x10, "Configurator", BackendKind::Uia, 1.0, false, false),
+        sample_window(0x10, "Enterprise", BackendKind::Uia, 1.0, false, false),
         sample_window(0x20, "Enterprise", BackendKind::Uia, 1.0, false, false),
     ];
-    let updated_window = sample_window(0x10, "Configurator", BackendKind::Uia, 1.0, false, true);
+    let updated_window = sample_window(0x10, "Enterprise", BackendKind::Uia, 1.0, false, true);
     let source = Arc::new(FakeObservationSource::new(
         initial_windows.clone(),
         vec![(0x10, Some(updated_window.clone()))],
@@ -110,10 +110,99 @@ async fn targeted_refresh_uses_window_scope_without_full_rescan() {
 }
 
 #[tokio::test]
+async fn enterprise_mode_filters_out_configurator_windows() {
+    let initial_windows = vec![
+        sample_window(0x10, "Configurator", BackendKind::Uia, 1.0, false, false),
+        sample_window(0x20, "Enterprise", BackendKind::Uia, 1.0, false, false),
+    ];
+    let source = Arc::new(FakeObservationSource::new(
+        initial_windows,
+        Vec::new(),
+        None,
+    ));
+    let backend = WindowsBackend::from_source(source);
+
+    let session = backend
+        .open_session(test_params())
+        .await
+        .expect("open session");
+
+    assert_eq!(session.initial_snapshot.windows.len(), 1);
+    assert_eq!(session.initial_snapshot.windows[0].title, "Enterprise");
+    assert_eq!(
+        property_string(
+            &session.initial_snapshot.windows[0].root.properties,
+            "onec_window_profile"
+        ),
+        Some("ordinary_form_window")
+    );
+}
+
+#[test]
+fn metadata_hint_prefilters_non_matching_modes() {
+    assert!(matches_onec_metadata_hint(
+        Some("1cv8.exe"),
+        "1C:Enterprise",
+        Some("V8TopLevelFrame"),
+        &SessionMode::EnterpriseUi,
+    ));
+    assert!(!matches_onec_metadata_hint(
+        Some("1cv8c.exe"),
+        "Конфигуратор",
+        Some("V8TopLevelFrame"),
+        &SessionMode::EnterpriseUi,
+    ));
+    assert!(matches_onec_metadata_hint(
+        Some("1cv8c.exe"),
+        "Конфигуратор",
+        Some("V8TopLevelFrame"),
+        &SessionMode::Configurator,
+    ));
+}
+
+#[tokio::test]
+async fn configurator_mode_marks_fallback_surfaces() {
+    let initial_windows = vec![
+        sample_window(0x10, "Enterprise", BackendKind::Uia, 1.0, false, false),
+        sample_window(0x20, "Configurator", BackendKind::Msaa, 0.45, false, false),
+    ];
+    let source = Arc::new(FakeObservationSource::new(
+        initial_windows,
+        Vec::new(),
+        None,
+    ));
+    let backend = WindowsBackend::from_source(source);
+    let params = BackendSessionParams {
+        session_id: vmui_protocol::SessionId::from("sess-config"),
+        mode: SessionMode::Configurator,
+        shallow: false,
+    };
+
+    let session = backend.open_session(params).await.expect("open session");
+
+    assert_eq!(session.initial_snapshot.windows.len(), 1);
+    let window = &session.initial_snapshot.windows[0];
+    assert_eq!(window.title, "Configurator");
+    assert_eq!(window.confidence, 0.45);
+    assert_eq!(
+        property_string(&window.root.properties, "onec_window_profile"),
+        Some("configurator_window")
+    );
+    assert_eq!(
+        property_string(&window.root.properties, "onec_fallback_reason"),
+        Some("fallback_backend")
+    );
+    assert_eq!(
+        property_string(&window.root.children[0].properties, "onec_profile"),
+        Some("configurator_text_editor")
+    );
+}
+
+#[tokio::test]
 async fn initial_snapshot_preserves_backend_provenance_and_confidence() {
     let initial_windows = vec![sample_window(
         0x30,
-        "Designer",
+        "Configurator",
         BackendKind::Mixed,
         0.7,
         false,
@@ -125,10 +214,12 @@ async fn initial_snapshot_preserves_backend_provenance_and_confidence() {
         None,
     ));
     let backend = WindowsBackend::from_source(source);
-    let session = backend
-        .open_session(test_params())
-        .await
-        .expect("open session");
+    let params = BackendSessionParams {
+        session_id: vmui_protocol::SessionId::from("sess-config-provenance"),
+        mode: SessionMode::Configurator,
+        shallow: false,
+    };
+    let session = backend.open_session(params).await.expect("open session");
 
     assert_eq!(
         session.initial_snapshot.windows[0].backend,
@@ -415,5 +506,15 @@ fn sibling_button(hwnd: usize, name: &str) -> ElementNode {
         },
         children: Vec::new(),
         confidence: 1.0,
+    }
+}
+
+fn property_string<'a>(
+    properties: &'a BTreeMap<String, vmui_protocol::PropertyValue>,
+    key: &str,
+) -> Option<&'a str> {
+    match properties.get(key) {
+        Some(vmui_protocol::PropertyValue::String(value)) => Some(value.as_str()),
+        _ => None,
     }
 }

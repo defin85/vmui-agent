@@ -697,6 +697,9 @@ fn parse_action_kind(kind: &str, payload_json: &str) -> Result<domain::ActionKin
             payload_json,
             "action_request.payload_json",
         )?)),
+        "collect_diagnostic_bundle" => Ok(domain::ActionKind::CollectDiagnosticBundle(
+            decode_json(payload_json, "action_request.payload_json")?,
+        )),
         other => Err(ConvertError::UnsupportedActionKind(other.to_owned())),
     }
 }
@@ -765,6 +768,10 @@ pub fn encode_action_request(
         domain::ActionKind::WriteArtifact(payload) => {
             ("write_artifact".to_owned(), encode_json(payload)?)
         }
+        domain::ActionKind::CollectDiagnosticBundle(payload) => (
+            "collect_diagnostic_bundle".to_owned(),
+            encode_json(payload)?,
+        ),
     };
 
     Ok(pb::ActionRequest {
@@ -809,9 +816,10 @@ mod tests {
 
     use chrono::TimeZone;
     use vmui_protocol::{
-        ActionId, ActionKind, ActionRequest, ActionTarget, BackendKind, CapturePolicy, ElementId,
-        ElementNode, ElementStates, Locator, PropertyValue, Rect, SessionId, SessionMode,
-        TreeRequest, UiSnapshot, WindowId, WindowState,
+        ActionId, ActionKind, ActionRequest, ActionTarget, BackendKind, CapturePolicy,
+        DiagnosticBundleOptions, DiagnosticStepVerdict, ElementId, ElementNode, ElementStates,
+        Locator, PropertyValue, Rect, SessionId, SessionMode, TreeRequest, UiSnapshot, WindowId,
+        WindowState,
     };
 
     use super::*;
@@ -896,6 +904,29 @@ mod tests {
                 max_depth: Some(2),
             }),
             capture_policy: CapturePolicy::OnFailure,
+        };
+
+        let proto = encode_action_request(&request).expect("encode request");
+        let decoded: ActionRequest = proto.try_into().expect("decode request");
+
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn collect_diagnostic_bundle_roundtrip_preserves_baseline_reference() {
+        let request = ActionRequest {
+            action_id: ActionId::from("diag-1"),
+            timeout_ms: 5_000,
+            target: ActionTarget::Desktop,
+            kind: ActionKind::CollectDiagnosticBundle(DiagnosticBundleOptions {
+                step_id: Some("step-42".to_owned()),
+                step_label: "Failed login check".to_owned(),
+                test_verdict: DiagnosticStepVerdict::Failed,
+                note: Some("runner=standard-1c".to_owned()),
+                baseline_artifact_id: Some("art-baseline".into()),
+                max_tree_depth: Some(3),
+            }),
+            capture_policy: CapturePolicy::Never,
         };
 
         let proto = encode_action_request(&request).expect("encode request");

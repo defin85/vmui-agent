@@ -1,4 +1,10 @@
-use std::{net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -68,6 +74,10 @@ where
             }
             domain::ActionKind::WriteArtifact(options) => {
                 self.execute_write_artifact(context, action, options).await
+            }
+            domain::ActionKind::CollectDiagnosticBundle(options) => {
+                self.execute_collect_diagnostic_bundle(context, action, options)
+                    .await
             }
             domain::ActionKind::OcrRegion(options)
                 if !self.backend.capabilities().supports_ocr_fallback =>
@@ -240,6 +250,117 @@ where
             ok: true,
             status: domain::ActionStatus::Completed,
             message: format!("stored artifact `{kind}`"),
+            artifacts,
+        })
+    }
+
+    async fn execute_collect_diagnostic_bundle(
+        &self,
+        context: &SessionContext,
+        action: domain::ActionRequest,
+        options: domain::DiagnosticBundleOptions,
+    ) -> Result<domain::ActionResult, Status> {
+        let snapshot = self.best_effort_snapshot(context).await?;
+        let recent_diffs = {
+            let state = self.state.read().await;
+            state
+                .sessions
+                .recent_diffs(&context.session_id)
+                .unwrap_or_default()
+        };
+        let target_tree =
+            build_tree_payload(&snapshot, &action.target, false, options.max_tree_depth);
+        let baseline_comparison = self
+            .build_baseline_comparison(&snapshot, options.baseline_artifact_id.as_ref())
+            .await?;
+        let fallback_surfaces = collect_fallback_surfaces(&snapshot, &action.target);
+        let bundle_payload = json!({
+            "diagnostic_context": {
+                "session_id": context.session_id.clone(),
+                "mode": context.mode.clone(),
+                "step_id": options.step_id.clone(),
+                "step_label": options.step_label.clone(),
+                "test_verdict": options.test_verdict.clone(),
+                "test_verdict_source": "external_runner",
+                "daemon_diagnostic_status": "completed",
+                "note": options.note.clone(),
+                "baseline_artifact_id": options.baseline_artifact_id.clone(),
+            },
+            "target": action.target.clone(),
+            "active_windows": snapshot.windows.clone(),
+            "target_tree": target_tree.clone(),
+            "recent_diffs": recent_diffs.clone(),
+            "baseline_comparison": baseline_comparison.clone(),
+            "fallback_surfaces": fallback_surfaces,
+        });
+
+        let mut artifacts = {
+            let mut state = self.state.write().await;
+            let mut artifacts = vec![
+                write_json_artifact(
+                    &mut state,
+                    Some(context.session_id.clone()),
+                    "diagnostic-json",
+                    &bundle_payload,
+                )
+                .map_err(internal_status)?,
+                write_json_artifact(
+                    &mut state,
+                    Some(context.session_id.clone()),
+                    "snapshot-json",
+                    &snapshot,
+                )
+                .map_err(internal_status)?,
+                write_json_artifact(
+                    &mut state,
+                    Some(context.session_id.clone()),
+                    "diff-json",
+                    &recent_diffs,
+                )
+                .map_err(internal_status)?,
+            ];
+
+            if let Some(target_tree) = &target_tree {
+                artifacts.push(
+                    write_json_artifact(
+                        &mut state,
+                        Some(context.session_id.clone()),
+                        "snapshot-json",
+                        target_tree,
+                    )
+                    .map_err(internal_status)?,
+                );
+            }
+
+            if let Some(comparison) = &baseline_comparison {
+                artifacts.push(
+                    write_json_artifact(
+                        &mut state,
+                        Some(context.session_id.clone()),
+                        "baseline-comparison-json",
+                        comparison,
+                    )
+                    .map_err(internal_status)?,
+                );
+            }
+
+            artifacts
+        };
+
+        artifacts.extend(
+            self.capture_diagnostic_target_artifacts(context, &action.target, &snapshot)
+                .await?,
+        );
+
+        Ok(domain::ActionResult {
+            action_id: action.action_id,
+            ok: true,
+            status: domain::ActionStatus::Completed,
+            message: format!(
+                "collected diagnostic bundle for step `{}` with {} artifacts",
+                options.step_label,
+                artifacts.len()
+            ),
             artifacts,
         })
     }
@@ -465,6 +586,85 @@ where
         };
         artifacts.push(artifact);
         Ok(())
+    }
+
+    async fn build_baseline_comparison(
+        &self,
+        snapshot: &domain::UiSnapshot,
+        baseline_artifact_id: Option<&domain::ArtifactId>,
+    ) -> Result<Option<serde_json::Value>, Status> {
+        let Some(baseline_artifact_id) = baseline_artifact_id else {
+            return Ok(None);
+        };
+
+        let bytes = {
+            let state = self.state.read().await;
+            match state.artifacts.read_bytes(baseline_artifact_id) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return Ok(Some(json!({
+                        "status": "missing_baseline_artifact",
+                        "baseline_artifact_id": baseline_artifact_id,
+                        "message": error.to_string(),
+                    })));
+                }
+            }
+        };
+
+        let baseline_snapshot = match decode_baseline_snapshot(&bytes) {
+            Ok(snapshot) => snapshot,
+            Err(message) => {
+                return Ok(Some(json!({
+                    "status": "invalid_baseline_artifact",
+                    "baseline_artifact_id": baseline_artifact_id,
+                    "message": message,
+                })));
+            }
+        };
+
+        Ok(Some(compare_snapshots(
+            baseline_artifact_id,
+            &baseline_snapshot,
+            snapshot,
+        )))
+    }
+
+    async fn capture_diagnostic_target_artifacts(
+        &self,
+        context: &SessionContext,
+        target: &domain::ActionTarget,
+        snapshot: &domain::UiSnapshot,
+    ) -> Result<Vec<domain::ArtifactDescriptor>, Status> {
+        let Some(target) = build_diagnostic_capture_target(snapshot, target) else {
+            return Ok(Vec::new());
+        };
+
+        let capture_request = domain::ActionRequest {
+            action_id: domain::ActionId::new("diag-capture"),
+            timeout_ms: 2_000,
+            target,
+            kind: domain::ActionKind::CaptureRegion(domain::CaptureOptions {
+                format: domain::CaptureFormat::Png,
+            }),
+            capture_policy: domain::CapturePolicy::Never,
+        };
+
+        let action_result = self
+            .backend
+            .perform_action(capture_request)
+            .await
+            .map_err(internal_status)?;
+        if !action_result.ok || action_result.status != domain::ActionStatus::Completed {
+            return Ok(Vec::new());
+        }
+
+        let mut state = self.state.write().await;
+        persist_action_artifacts(
+            &mut state,
+            Some(context.session_id.clone()),
+            action_result.artifacts,
+        )
+        .map_err(internal_status)
     }
 
     async fn process_session(
@@ -852,6 +1052,616 @@ fn build_write_artifact_payload(
     }
 }
 
+fn decode_baseline_snapshot(bytes: &[u8]) -> Result<domain::UiSnapshot, String> {
+    if let Ok(snapshot) = serde_json::from_slice::<domain::UiSnapshot>(bytes) {
+        return Ok(snapshot);
+    }
+
+    let payload: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("baseline json decode failed: {error}"))?;
+    if let Some(snapshot) = payload.get("snapshot") {
+        return serde_json::from_value(snapshot.clone())
+            .map_err(|error| format!("baseline snapshot decode failed: {error}"));
+    }
+
+    Err("baseline artifact does not contain a ui snapshot".to_owned())
+}
+
+fn compare_snapshots(
+    baseline_artifact_id: &domain::ArtifactId,
+    expected: &domain::UiSnapshot,
+    actual: &domain::UiSnapshot,
+) -> serde_json::Value {
+    let expected_windows = expected
+        .windows
+        .iter()
+        .map(compared_window)
+        .collect::<Vec<_>>();
+    let actual_windows = actual
+        .windows
+        .iter()
+        .map(compared_window)
+        .collect::<Vec<_>>();
+    let matched_windows = match_windows(&expected_windows, &actual_windows);
+    let matched_expected = matched_windows
+        .iter()
+        .map(|pair| pair.expected_idx)
+        .collect::<BTreeSet<_>>();
+    let matched_actual = matched_windows
+        .iter()
+        .map(|pair| pair.actual_idx)
+        .collect::<BTreeSet<_>>();
+
+    let added_windows = actual_windows
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matched_actual.contains(index))
+        .map(|(_, window)| diagnostic_window_inventory_json(window))
+        .collect::<Vec<_>>();
+    let removed_windows = expected_windows
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matched_expected.contains(index))
+        .map(|(_, window)| diagnostic_window_inventory_json(window))
+        .collect::<Vec<_>>();
+    let matched_windows_json = matched_windows
+        .iter()
+        .map(|pair| {
+            let expected_window = &expected_windows[pair.expected_idx];
+            let actual_window = &actual_windows[pair.actual_idx];
+            json!({
+                "expected_window_id": expected_window.window.window_id,
+                "actual_window_id": actual_window.window.window_id,
+                "match_score": pair.score,
+                "expected_title": expected_window.window.title,
+                "actual_title": actual_window.window.title,
+                "process_name": actual_window
+                    .summary
+                    .process_name
+                    .clone()
+                    .or_else(|| expected_window.summary.process_name.clone()),
+                "onec_window_profile": actual_window
+                    .summary
+                    .onec_window_profile
+                    .clone()
+                    .or_else(|| expected_window.summary.onec_window_profile.clone()),
+                "root_class_name": actual_window
+                    .summary
+                    .root_class_name
+                    .clone()
+                    .or_else(|| expected_window.summary.root_class_name.clone()),
+            })
+        })
+        .collect::<Vec<_>>();
+    let changed_windows = matched_windows
+        .iter()
+        .filter_map(|pair| {
+            let expected_window = &expected_windows[pair.expected_idx];
+            let actual_window = &actual_windows[pair.actual_idx];
+            let changed_fields = expected_window
+                .summary
+                .changed_fields(&actual_window.summary);
+
+            (!changed_fields.is_empty()).then(|| {
+                json!({
+                    "expected_window_id": expected_window.window.window_id,
+                    "actual_window_id": actual_window.window.window_id,
+                    "match_score": pair.score,
+                    "changed_fields": changed_fields,
+                    "expected": expected_window.summary.json_view(),
+                    "actual": actual_window.summary.json_view(),
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let matches = expected.mode == actual.mode
+        && added_windows.is_empty()
+        && removed_windows.is_empty()
+        && changed_windows.is_empty();
+
+    json!({
+        "status": "compared",
+        "baseline_artifact_id": baseline_artifact_id,
+        "matches": matches,
+        "expected_mode": expected.mode,
+        "actual_mode": actual.mode,
+        "expected_window_count": expected.windows.len(),
+        "actual_window_count": actual.windows.len(),
+        "matched_windows": matched_windows_json,
+        "added_windows": added_windows,
+        "removed_windows": removed_windows,
+        "changed_windows": changed_windows,
+    })
+}
+
+struct ComparedWindow<'a> {
+    window: &'a domain::WindowState,
+    summary: DiagnosticWindowSummary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DiagnosticWindowSummary {
+    title: String,
+    process_name: Option<String>,
+    backend: domain::BackendKind,
+    confidence_bits: u32,
+    width: i32,
+    height: i32,
+    onec_window_profile: Option<String>,
+    onec_fallback_reason: Option<String>,
+    root_control_type: String,
+    root_class_name: Option<String>,
+    root_name: Option<String>,
+    root_automation_id: Option<String>,
+    tree_signature: String,
+    tree_digest: String,
+    node_count: usize,
+    fallback_surface_count: usize,
+}
+
+impl DiagnosticWindowSummary {
+    fn changed_fields(&self, other: &Self) -> Vec<&'static str> {
+        let mut fields = Vec::new();
+
+        if self.title != other.title {
+            fields.push("title");
+        }
+        if self.process_name != other.process_name {
+            fields.push("process_name");
+        }
+        if self.backend != other.backend {
+            fields.push("backend");
+        }
+        if self.confidence_bits != other.confidence_bits {
+            fields.push("confidence");
+        }
+        if self.width != other.width || self.height != other.height {
+            fields.push("window_size");
+        }
+        if self.onec_window_profile != other.onec_window_profile {
+            fields.push("onec_window_profile");
+        }
+        if self.onec_fallback_reason != other.onec_fallback_reason {
+            fields.push("onec_fallback_reason");
+        }
+        if self.root_control_type != other.root_control_type {
+            fields.push("root_control_type");
+        }
+        if self.root_class_name != other.root_class_name {
+            fields.push("root_class_name");
+        }
+        if self.root_name != other.root_name {
+            fields.push("root_name");
+        }
+        if self.root_automation_id != other.root_automation_id {
+            fields.push("root_automation_id");
+        }
+        if self.tree_signature != other.tree_signature {
+            fields.push("tree_state");
+        }
+
+        fields
+    }
+
+    fn json_view(&self) -> serde_json::Value {
+        json!({
+            "title": self.title,
+            "process_name": self.process_name,
+            "backend": self.backend,
+            "confidence": f32::from_bits(self.confidence_bits),
+            "window_size": {
+                "width": self.width,
+                "height": self.height,
+            },
+            "onec_window_profile": self.onec_window_profile,
+            "onec_fallback_reason": self.onec_fallback_reason,
+            "root_control_type": self.root_control_type,
+            "root_class_name": self.root_class_name,
+            "root_name": self.root_name,
+            "root_automation_id": self.root_automation_id,
+            "tree_digest": self.tree_digest,
+            "node_count": self.node_count,
+            "fallback_surface_count": self.fallback_surface_count,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MatchedWindowPair {
+    expected_idx: usize,
+    actual_idx: usize,
+    score: usize,
+}
+
+#[derive(Clone, Debug)]
+struct NodeSemanticState {
+    signature: String,
+    node_count: usize,
+    fallback_surface_count: usize,
+}
+
+fn compared_window(window: &domain::WindowState) -> ComparedWindow<'_> {
+    ComparedWindow {
+        window,
+        summary: summarize_window(window),
+    }
+}
+
+fn summarize_window(window: &domain::WindowState) -> DiagnosticWindowSummary {
+    let tree_state = summarize_node(&window.root);
+
+    DiagnosticWindowSummary {
+        title: window.title.clone(),
+        process_name: window.process_name.clone(),
+        backend: window.backend.clone(),
+        confidence_bits: window.confidence.to_bits(),
+        width: window.bounds.width,
+        height: window.bounds.height,
+        onec_window_profile: property_string(&window.root.properties, "onec_window_profile"),
+        onec_fallback_reason: property_string(&window.root.properties, "onec_fallback_reason"),
+        root_control_type: window.root.control_type.clone(),
+        root_class_name: window.root.class_name.clone(),
+        root_name: window.root.name.clone(),
+        root_automation_id: window.root.automation_id.clone(),
+        tree_digest: stable_digest(&tree_state.signature),
+        tree_signature: tree_state.signature,
+        node_count: tree_state.node_count,
+        fallback_surface_count: tree_state.fallback_surface_count,
+    }
+}
+
+fn summarize_node(node: &domain::ElementNode) -> NodeSemanticState {
+    let mut children = node.children.iter().map(summarize_node).collect::<Vec<_>>();
+    children.sort_by(|left, right| left.signature.cmp(&right.signature));
+
+    let child_signatures = children
+        .iter()
+        .map(|child| child.signature.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let signature = format!(
+        "backend={};control={};class={};name={};automation={};confidence={:08x};states={};properties={};children=[{}]",
+        backend_label(&node.backend),
+        normalize_text(&node.control_type),
+        normalize_optional_text(node.class_name.as_deref()),
+        normalize_optional_text(node.name.as_deref()),
+        normalize_optional_text(node.automation_id.as_deref()),
+        node.confidence.to_bits(),
+        node_states_signature(&node.states),
+        property_map_signature(&node.properties),
+        child_signatures,
+    );
+
+    NodeSemanticState {
+        signature,
+        node_count: 1 + children.iter().map(|child| child.node_count).sum::<usize>(),
+        fallback_surface_count: usize::from(
+            property_string(&node.properties, "onec_fallback_reason").is_some(),
+        ) + children
+            .iter()
+            .map(|child| child.fallback_surface_count)
+            .sum::<usize>(),
+    }
+}
+
+fn match_windows(
+    expected: &[ComparedWindow<'_>],
+    actual: &[ComparedWindow<'_>],
+) -> Vec<MatchedWindowPair> {
+    let mut candidates = Vec::new();
+
+    for (expected_idx, expected_window) in expected.iter().enumerate() {
+        for (actual_idx, actual_window) in actual.iter().enumerate() {
+            let score = window_match_score(&expected_window.summary, &actual_window.summary);
+            if score > 0 {
+                candidates.push(MatchedWindowPair {
+                    expected_idx,
+                    actual_idx,
+                    score,
+                });
+            }
+        }
+    }
+
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.expected_idx.cmp(&right.expected_idx))
+            .then_with(|| left.actual_idx.cmp(&right.actual_idx))
+    });
+
+    let mut matched_expected = BTreeSet::new();
+    let mut matched_actual = BTreeSet::new();
+    let mut matched = Vec::new();
+
+    for candidate in candidates {
+        if candidate.score < 7
+            || matched_expected.contains(&candidate.expected_idx)
+            || matched_actual.contains(&candidate.actual_idx)
+        {
+            continue;
+        }
+
+        matched_expected.insert(candidate.expected_idx);
+        matched_actual.insert(candidate.actual_idx);
+        matched.push(candidate);
+    }
+
+    matched.sort_by(|left, right| left.expected_idx.cmp(&right.expected_idx));
+    matched
+}
+
+fn window_match_score(
+    expected: &DiagnosticWindowSummary,
+    actual: &DiagnosticWindowSummary,
+) -> usize {
+    let same_process = normalized_optional_eq(
+        expected.process_name.as_deref(),
+        actual.process_name.as_deref(),
+    );
+    let same_profile = normalized_optional_eq(
+        expected.onec_window_profile.as_deref(),
+        actual.onec_window_profile.as_deref(),
+    );
+    let same_root_class = normalized_optional_eq(
+        expected.root_class_name.as_deref(),
+        actual.root_class_name.as_deref(),
+    );
+
+    if !same_process && !same_profile && !same_root_class {
+        return 0;
+    }
+
+    let mut score = 0;
+    if same_process {
+        score += 4;
+    }
+    if same_profile {
+        score += 5;
+    }
+    if same_root_class {
+        score += 4;
+    }
+    if normalize_text(&expected.root_control_type) == normalize_text(&actual.root_control_type) {
+        score += 2;
+    }
+    if normalized_optional_eq(expected.root_name.as_deref(), actual.root_name.as_deref()) {
+        score += 2;
+    }
+    if normalize_text(&expected.title) == normalize_text(&actual.title) {
+        score += 1;
+    }
+    if expected.width == actual.width && expected.height == actual.height {
+        score += 1;
+    }
+    if expected.backend == actual.backend {
+        score += 1;
+    }
+    if expected.tree_digest == actual.tree_digest {
+        score += 1;
+    }
+
+    score
+}
+
+fn diagnostic_window_inventory_json(window: &ComparedWindow<'_>) -> serde_json::Value {
+    json!({
+        "window_id": window.window.window_id,
+        "title": window.window.title,
+        "process_name": window.window.process_name,
+        "onec_window_profile": window.summary.onec_window_profile,
+        "root_control_type": window.summary.root_control_type,
+        "root_class_name": window.summary.root_class_name,
+        "tree_digest": window.summary.tree_digest,
+    })
+}
+
+fn backend_label(backend: &domain::BackendKind) -> &'static str {
+    match backend {
+        domain::BackendKind::Uia => "uia",
+        domain::BackendKind::Msaa => "msaa",
+        domain::BackendKind::Ocr => "ocr",
+        domain::BackendKind::Mixed => "mixed",
+    }
+}
+
+fn node_states_signature(states: &domain::ElementStates) -> String {
+    format!(
+        "enabled={};visible={};focused={};selected={};expanded={};toggled={}",
+        states.enabled,
+        states.visible,
+        states.focused,
+        states.selected,
+        states.expanded,
+        states.toggled,
+    )
+}
+
+fn property_map_signature(properties: &BTreeMap<String, domain::PropertyValue>) -> String {
+    properties
+        .iter()
+        .map(|(key, value)| {
+            format!(
+                "{}={}",
+                normalize_text(key),
+                property_value_signature(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn property_value_signature(value: &domain::PropertyValue) -> String {
+    match value {
+        domain::PropertyValue::Bool(value) => format!("bool:{value}"),
+        domain::PropertyValue::I64(value) => format!("i64:{value}"),
+        domain::PropertyValue::F64(value) => format!("f64:{:016x}", value.to_bits()),
+        domain::PropertyValue::String(value) => format!("string:{}", normalize_text(value)),
+        domain::PropertyValue::StringList(values) => format!(
+            "strings:{}",
+            values
+                .iter()
+                .map(|value| normalize_text(value))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        domain::PropertyValue::Rect(rect) => format!(
+            "rect:{}:{}:{}:{}",
+            rect.left, rect.top, rect.width, rect.height
+        ),
+        domain::PropertyValue::Null => "null".to_owned(),
+    }
+}
+
+fn normalized_optional_eq(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            let left = normalize_text(left);
+            let right = normalize_text(right);
+            !left.is_empty() && left == right
+        }
+        _ => false,
+    }
+}
+
+fn normalize_optional_text(value: Option<&str>) -> String {
+    value.map(normalize_text).unwrap_or_default()
+}
+
+fn normalize_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn stable_digest(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn property_string(
+    properties: &BTreeMap<String, domain::PropertyValue>,
+    key: &str,
+) -> Option<String> {
+    match properties.get(key) {
+        Some(domain::PropertyValue::String(value)) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn build_diagnostic_capture_target(
+    snapshot: &domain::UiSnapshot,
+    target: &domain::ActionTarget,
+) -> Option<domain::ActionTarget> {
+    match target {
+        domain::ActionTarget::Desktop => None,
+        domain::ActionTarget::Window(locator) => {
+            let window = resolve_window(snapshot, locator)?;
+            Some(domain::ActionTarget::Region(domain::RegionTarget {
+                window_id: Some(window.window_id.clone()),
+                bounds: domain::Rect {
+                    left: 0,
+                    top: 0,
+                    width: window.bounds.width,
+                    height: window.bounds.height,
+                },
+            }))
+        }
+        domain::ActionTarget::Element(locator) => {
+            let resolved = resolve_element(snapshot, locator)?;
+            Some(domain::ActionTarget::Region(domain::RegionTarget {
+                window_id: Some(resolved.window.window_id.clone()),
+                bounds: domain::Rect {
+                    left: resolved.node.bounds.left - resolved.window.bounds.left,
+                    top: resolved.node.bounds.top - resolved.window.bounds.top,
+                    width: resolved.node.bounds.width,
+                    height: resolved.node.bounds.height,
+                },
+            }))
+        }
+        domain::ActionTarget::Region(region) => Some(domain::ActionTarget::Region(region.clone())),
+    }
+}
+
+fn collect_fallback_surfaces(
+    snapshot: &domain::UiSnapshot,
+    target: &domain::ActionTarget,
+) -> Vec<serde_json::Value> {
+    let mut surfaces = Vec::new();
+
+    match target {
+        domain::ActionTarget::Desktop => {
+            for window in &snapshot.windows {
+                collect_fallback_surfaces_from_node(&mut surfaces, &window.window_id, &window.root);
+            }
+        }
+        domain::ActionTarget::Window(locator) => {
+            if let Some(window) = resolve_window(snapshot, locator) {
+                collect_fallback_surfaces_from_node(&mut surfaces, &window.window_id, &window.root);
+            }
+        }
+        domain::ActionTarget::Element(locator) => {
+            if let Some(resolved) = resolve_element(snapshot, locator) {
+                collect_fallback_surfaces_from_node(
+                    &mut surfaces,
+                    &resolved.window.window_id,
+                    resolved.node,
+                );
+            }
+        }
+        domain::ActionTarget::Region(region) => {
+            if let Some(window_id) = &region.window_id {
+                if let Some(window) = snapshot
+                    .windows
+                    .iter()
+                    .find(|window| &window.window_id == window_id)
+                {
+                    collect_fallback_surfaces_from_node(
+                        &mut surfaces,
+                        &window.window_id,
+                        &window.root,
+                    );
+                }
+            }
+        }
+    }
+
+    surfaces
+}
+
+fn collect_fallback_surfaces_from_node(
+    surfaces: &mut Vec<serde_json::Value>,
+    window_id: &domain::WindowId,
+    node: &domain::ElementNode,
+) {
+    let fallback_reason = property_string(&node.properties, "onec_fallback_reason");
+    let profile = property_string(&node.properties, "onec_profile");
+    if fallback_reason.is_some()
+        || node.backend != domain::BackendKind::Uia
+        || node.confidence < 0.6
+    {
+        surfaces.push(json!({
+            "window_id": window_id,
+            "element_id": node.element_id,
+            "backend": node.backend,
+            "confidence": node.confidence,
+            "onec_profile": profile,
+            "onec_fallback_reason": fallback_reason,
+        }));
+    }
+
+    for child in &node.children {
+        collect_fallback_surfaces_from_node(surfaces, window_id, child);
+    }
+}
+
 fn wait_condition_matches(
     snapshot: &domain::UiSnapshot,
     target: &domain::ActionTarget,
@@ -936,6 +1746,7 @@ fn should_attach_snapshot_artifact(
         domain::ActionKind::ListWindows
             | domain::ActionKind::GetTree(_)
             | domain::ActionKind::WriteArtifact(_)
+            | domain::ActionKind::CollectDiagnosticBundle(_)
             | domain::ActionKind::CaptureRegion(_)
             | domain::ActionKind::OcrRegion(_)
     );
@@ -1071,6 +1882,7 @@ fn action_kind_label(kind: &domain::ActionKind) -> &'static str {
         domain::ActionKind::CaptureRegion(_) => "capture_region",
         domain::ActionKind::OcrRegion(_) => "ocr_region",
         domain::ActionKind::WriteArtifact(_) => "write_artifact",
+        domain::ActionKind::CollectDiagnosticBundle(_) => "collect_diagnostic_bundle",
     }
 }
 

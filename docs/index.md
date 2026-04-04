@@ -17,6 +17,8 @@
   `proto/vmui/v1/agent.proto` -> `crates/vmui-protocol/src/lib.rs` -> `crates/vmui-transport-grpc/src/lib.rs`
 - Daemon session flow, server-side actions, artifact persistence:
   `crates/vmui-agent/src/lib.rs`
+- Post-failure 1C diagnostic bundles and baseline comparison:
+  `crates/vmui-agent/src/lib.rs`
 - Daemon integration tests and session/action regression coverage:
   `crates/vmui-agent/src/tests.rs`
 - Runtime defaults such as bind address, artifact dir, and default mode:
@@ -25,6 +27,8 @@
   `crates/vmui-platform/src/lib.rs`
 - Windows UIA, WinEvent, MSAA, SendInput, and capture behavior:
   `crates/vmui-platform-windows/src/lib.rs` -> `crates/vmui-platform-windows/src/windows_impl.rs`
+- 1C mode filtering, locator profile annotations, and fallback surface marking:
+  `crates/vmui-platform-windows/src/lib.rs`
 - Windows backend tests and refresh/stabilization checks:
   `crates/vmui-platform-windows/src/tests.rs`
 - External MCP bridge scaffold:
