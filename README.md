@@ -26,8 +26,9 @@ This repository is intentionally scaffolded for agent-driven development:
 - semantic action execution is implemented in the daemon and Windows backend;
 - explicit 1C `enterprise_ui` and `configurator` modes now filter tracked windows and annotate 1C-specific profiles/fallback expectations;
 - post-failure 1C diagnostic bundles now capture current state, recent diffs, baseline comparison, and targeted artifacts while preserving the original external test verdict;
-- MCP remains a thin proxy and the current `vmui-mcp-proxy` binary is still a scaffold;
-- MCP bridge hardening is still pending.
+- daemon runtime status now exposes structured health, resync, warning, fallback, action-outcome, and artifact-retention summaries;
+- artifact retention is now explicit, with startup orphan sweep plus periodic cleanup;
+- `vmui-mcp-proxy` now provides a `stdio` MCP bridge with logical sessions, daemon session reuse, read-only reconnect, and no silent retry for mutating actions.
 
 ## Workspace Layout
 
@@ -37,7 +38,7 @@ This repository is intentionally scaffolded for agent-driven development:
 - `crates/vmui-platform-windows`: Windows UI backend with interactive-session gating, UIA snapshot reads and WinEvent/MSAA refresh integration.
 - `crates/vmui-transport-grpc`: generated protobuf/tonic types and conversion layer.
 - `crates/vmui-agent`: in-VM daemon entrypoint.
-- `crates/vmui-mcp-proxy`: external MCP adapter scaffold.
+- `crates/vmui-mcp-proxy`: external MCP adapter over daemon sessions.
 - `proto/vmui/v1/agent.proto`: canonical wire contract.
 - `docs/architecture.md`: recommended runtime architecture.
 - `docs/protocol.md`: API semantics and message flow.

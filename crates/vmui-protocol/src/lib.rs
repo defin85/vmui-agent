@@ -310,6 +310,7 @@ pub struct RegionTarget {
 pub enum ActionKind {
     ListWindows,
     GetTree(TreeRequest),
+    GetRuntimeStatus(RuntimeStatusRequest),
     FocusWindow,
     ClickElement(ClickOptions),
     SetValue(SetValueOptions),
@@ -327,6 +328,9 @@ pub struct TreeRequest {
     pub raw: bool,
     pub max_depth: Option<u32>,
 }
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeStatusRequest {}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClickOptions {
@@ -409,6 +413,96 @@ pub struct DiagnosticBundleOptions {
     pub note: Option<String>,
     pub baseline_artifact_id: Option<ArtifactId>,
     pub max_tree_depth: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeHealthState {
+    Healthy,
+    Degraded,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeStatusReport {
+    pub generated_at: DateTime<Utc>,
+    pub session_count: usize,
+    pub active_session_count: usize,
+    pub active_resync_sessions: usize,
+    pub health: RuntimeHealthSummary,
+    pub recoveries: RuntimeRecoverySummary,
+    pub warnings: RuntimeWarningSummary,
+    pub observations: RuntimeObservationSummary,
+    pub actions: Vec<ActionOutcomeSummary>,
+    pub artifact_store: ArtifactStoreStatus,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeHealthSummary {
+    pub status: RuntimeHealthState,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeRecoverySummary {
+    pub resync_count: u64,
+    pub last_resync_at: Option<DateTime<Utc>>,
+    pub last_resync_reason: Option<String>,
+    pub recovery_count: u64,
+    pub continuity_invalidated_count: u64,
+    pub last_recovery_at: Option<DateTime<Utc>>,
+    pub last_recovery_reason: Option<String>,
+    pub continuity_invalidated: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeWarningSummary {
+    pub total_count: u64,
+    pub by_code: BTreeMap<String, u64>,
+    pub by_class: BTreeMap<String, u64>,
+    pub last_warning_at: Option<DateTime<Utc>>,
+    pub last_warning_code: Option<String>,
+    pub last_warning_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactStorePressureState {
+    Healthy,
+    MaxCountExceeded,
+    MaxBytesExceeded,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeObservationSummary {
+    pub snapshot_count: u64,
+    pub fallback_heavy_snapshot_count: u64,
+    pub last_fallback_heavy_at: Option<DateTime<Utc>>,
+    pub last_fallback_surface_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionOutcomeSummary {
+    pub action: String,
+    pub completed: u64,
+    pub failed: u64,
+    pub timed_out: u64,
+    pub unsupported: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ArtifactStoreStatus {
+    pub artifact_count: usize,
+    pub total_bytes: u64,
+    pub max_count: usize,
+    pub max_bytes: u64,
+    pub max_age_seconds: u64,
+    pub cleanup_interval_seconds: u64,
+    pub cleanup_runs: u64,
+    pub deleted_artifact_count: u64,
+    pub deleted_bytes: u64,
+    pub last_cleanup_at: Option<DateTime<Utc>>,
+    pub last_cleanup_reason: Option<String>,
+    pub pressure_state: ArtifactStorePressureState,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

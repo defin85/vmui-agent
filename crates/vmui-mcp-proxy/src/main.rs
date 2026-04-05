@@ -1,6 +1,6 @@
 use anyhow::Result;
-use tracing::info;
 use tracing_subscriber::EnvFilter;
+use vmui_mcp_proxy::run_stdio_server;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -9,10 +9,5 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    info!("starting vmui-mcp-proxy scaffold; transport bridge is not implemented yet");
-
-    tokio::signal::ctrl_c().await?;
-    info!("shutdown requested");
-
-    Ok(())
+    run_stdio_server().await
 }

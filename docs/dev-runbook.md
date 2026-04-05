@@ -33,14 +33,18 @@
   `127.0.0.1:50051`
 - Default artifact directory:
   `var/artifacts`
+- Default artifact retention:
+  24h max age, 256 MiB max bytes, 512 artifacts, 5 minute periodic cleanup
 - Stop the daemon with `Ctrl-C`.
 
-## Running The MCP Proxy Scaffold
+## Running The MCP Proxy
 
-- Start the proxy scaffold:
+- Start the proxy against the default daemon:
   `RUST_LOG=info cargo run -p vmui-mcp-proxy`
+- Override the daemon endpoint when needed:
+  `VMUI_DAEMON_ADDR=http://127.0.0.1:50051 RUST_LOG=info cargo run -p vmui-mcp-proxy`
 - Current behavior:
-  logs startup, waits for `Ctrl-C`, and does not yet bridge MCP calls to the daemon transport.
+  starts a `stdio` MCP server with explicit logical sessions (`session_open`, `session_status`, `session_close`), daemon session reuse, read-only reconnect, and no silent retry for mutating tools.
 
 ## Host Expectations
 

@@ -6,9 +6,9 @@ After the daemon supports live observation, actions, and 1C workflows, external 
 
 ## What Changes
 
-- Implement a thin MCP bridge that translates tool-style requests onto long-lived daemon sessions.
-- Add reconnect, resync, and warning semantics needed for long-running usage.
-- Add artifact retention and runtime observability policies so operators can reason about stale state, fallback rate, and backend health.
+- Implement a thin `stdio`-first MCP bridge that translates tool-style requests onto explicit logical sessions backed by long-lived daemon sessions.
+- Add reconnect, resync, and warning semantics needed for long-running usage, with explicit no-auto-retry safety for mutating actions.
+- Add daemon-first artifact retention and runtime observability policies so operators can reason about stale state, fallback rate, and backend health.
 - Preserve the contract that external agents consume stateful updates instead of full screenshot polling.
 
 ## Impact

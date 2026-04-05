@@ -7,6 +7,22 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+futures-util.workspace = true
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", branch = "main", features = ["client", "server", "macros", "transport-io", "transport-child-process"] }
+schemars = "1"
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+vmui-core = { path = "../vmui-core" }
+vmui-protocol = { path = "../vmui-protocol" }
+vmui-transport-grpc = { path = "../vmui-transport-grpc" }
+
+[dev-dependencies]
+chrono.workspace = true
+tempfile.workspace = true
+vmui-agent = { path = "../vmui-agent" }
+vmui-platform = { path = "../vmui-platform" }

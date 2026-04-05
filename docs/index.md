@@ -21,7 +21,7 @@
   `crates/vmui-agent/src/lib.rs`
 - Daemon integration tests and session/action regression coverage:
   `crates/vmui-agent/src/tests.rs`
-- Runtime defaults such as bind address, artifact dir, and default mode:
+- Runtime defaults such as bind address, artifact dir, default mode, and artifact retention:
   `crates/vmui-core/src/lib.rs`
 - Platform abstraction:
   `crates/vmui-platform/src/lib.rs`
@@ -31,8 +31,8 @@
   `crates/vmui-platform-windows/src/lib.rs`
 - Windows backend tests and refresh/stabilization checks:
   `crates/vmui-platform-windows/src/tests.rs`
-- External MCP bridge scaffold:
-  `crates/vmui-mcp-proxy/src/main.rs`
+- External MCP bridge, logical session workers, and stdio contract tests:
+  `crates/vmui-mcp-proxy/src/lib.rs` -> `crates/vmui-mcp-proxy/src/main.rs` -> `crates/vmui-mcp-proxy/tests/stdio_integration.rs`
 
 ## Verification
 

@@ -13,6 +13,7 @@ use tokio::{
 };
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::transport::{Channel, Endpoint, Server};
+use vmui_core::ArtifactRetentionPolicy;
 use vmui_platform::{
     BackendActionResult, BackendArtifact, BackendCapabilities, BackendEvent, BackendSession,
     BackendSessionParams, UiBackend,
@@ -20,8 +21,9 @@ use vmui_platform::{
 use vmui_protocol::{
     ActionId, ActionRequest, ActionStatus, ActionTarget, ArtifactId, BackendKind, CapturePolicy,
     DiagnosticBundleOptions, DiagnosticStepVerdict, DiffOp, ElementId, ElementLocator, ElementNode,
-    ElementStates, Locator, PropertyValue, Rect, SessionId, SessionMode, TreeRequest, UiDiffBatch,
-    UiSnapshot, WaitCondition, WaitForOptions, WindowId, WindowLocator, WindowState,
+    ElementStates, Locator, PropertyValue, Rect, RuntimeHealthState, RuntimeStatusRequest,
+    SessionId, SessionMode, TreeRequest, UiDiffBatch, UiSnapshot, WaitCondition, WaitForOptions,
+    WindowId, WindowLocator, WindowState,
 };
 use vmui_transport_grpc::encode_action_request;
 use vmui_transport_grpc::pb::{self, client_msg, server_msg, ui_agent_client::UiAgentClient};
@@ -1075,6 +1077,88 @@ fn compare_snapshots_matches_cross_session_windows_semantically() {
 }
 
 #[tokio::test]
+async fn get_runtime_status_returns_structured_health_artifact() {
+    let dir = tempdir().expect("tempdir");
+    let (mut client, shutdown, state) = spawn_test_server_with_state(dir.path().to_path_buf())
+        .await
+        .expect("spawn server");
+    let action = encode_action_request(&ActionRequest {
+        action_id: ActionId::from("runtime-1"),
+        timeout_ms: 1_000,
+        target: ActionTarget::Desktop,
+        kind: domain::ActionKind::GetRuntimeStatus(RuntimeStatusRequest::default()),
+        capture_policy: CapturePolicy::Never,
+    })
+    .expect("encode action");
+
+    {
+        let mut state = state.write().await;
+        state.record_warning("backend_degraded", "observer restart required");
+        state.record_resync("stale diff");
+        state.record_recovery("observer restarted", true);
+        state.record_snapshot_observation(4);
+    }
+
+    let outbound = tokio_stream::iter(vec![
+        pb::ClientMsg {
+            payload: Some(client_msg::Payload::Hello(pb::Hello {
+                client_name: "test".to_owned(),
+                client_version: "0.1.0".to_owned(),
+                requested_mode: pb::SessionMode::EnterpriseUi as i32,
+            })),
+        },
+        pb::ClientMsg {
+            payload: Some(client_msg::Payload::Subscribe(pb::Subscribe {
+                include_initial_snapshot: false,
+                include_diff_stream: false,
+                shallow: false,
+            })),
+        },
+        pb::ClientMsg {
+            payload: Some(client_msg::Payload::ActionRequest(action)),
+        },
+    ]);
+
+    let response = client.session(outbound).await.expect("session RPC");
+    let mut inbound = response.into_inner();
+    let _ = inbound.message().await.expect("ack read").expect("ack");
+    let _ = inbound
+        .message()
+        .await
+        .expect("snapshot read")
+        .expect("snapshot payload");
+    let action_result = inbound
+        .message()
+        .await
+        .expect("action result read")
+        .expect("action result payload");
+
+    let artifact_id = match action_result.payload.expect("payload") {
+        server_msg::Payload::ActionResult(result) => {
+            assert!(result.ok);
+            assert_eq!(result.artifacts.len(), 1);
+            assert_eq!(result.artifacts[0].kind, "runtime-status-json");
+            result.artifacts[0].artifact_id.clone()
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    };
+
+    let payload = read_artifact_json(&mut client, artifact_id).await;
+    assert_eq!(payload["health"]["status"], "degraded");
+    assert_eq!(payload["recoveries"]["resync_count"], 1);
+    assert_eq!(payload["recoveries"]["continuity_invalidated"], true);
+    assert_eq!(payload["warnings"]["by_class"]["backend"], 1);
+    assert_eq!(payload["observations"]["fallback_heavy_snapshot_count"], 1);
+
+    let runtime_status = {
+        let state = state.read().await;
+        state.runtime_status()
+    };
+    assert_eq!(runtime_status.health.status, RuntimeHealthState::Degraded);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
 async fn stale_diff_triggers_resync_event_and_snapshot_refresh() {
     let dir = tempdir().expect("tempdir");
     let backend = StubBackend::with_events_and_snapshots(
@@ -1140,6 +1224,11 @@ async fn stale_diff_triggers_resync_event_and_snapshot_refresh() {
         .await
         .expect("refreshed snapshot read")
         .expect("refreshed snapshot payload");
+    let recovery_warning = inbound
+        .message()
+        .await
+        .expect("warning read")
+        .expect("warning payload");
 
     match initial.payload.expect("payload") {
         server_msg::Payload::InitialSnapshot(snapshot) => assert_eq!(snapshot.rev, 10),
@@ -1159,7 +1248,15 @@ async fn stale_diff_triggers_resync_event_and_snapshot_refresh() {
         other => panic!("unexpected payload: {other:?}"),
     }
 
-    let current_rev = {
+    match recovery_warning.payload.expect("payload") {
+        server_msg::Payload::Warning(warning) => {
+            assert_eq!(warning.code, "session_state_recovered");
+            assert!(warning.message.contains("continuity_invalidated=true"));
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    }
+
+    let (current_rev, runtime_status) = {
         let state = state.read().await;
         let session_id = state
             .sessions
@@ -1167,14 +1264,20 @@ async fn stale_diff_triggers_resync_event_and_snapshot_refresh() {
             .into_iter()
             .next()
             .expect("session id");
-        state
-            .sessions
-            .runtime(&session_id)
-            .and_then(|runtime| runtime.last_revision)
-            .expect("last revision")
+        (
+            state
+                .sessions
+                .runtime(&session_id)
+                .and_then(|runtime| runtime.last_revision)
+                .expect("last revision"),
+            state.runtime_status(),
+        )
     };
 
     assert_eq!(current_rev, 11);
+    assert_eq!(runtime_status.recoveries.resync_count, 1);
+    assert_eq!(runtime_status.recoveries.recovery_count, 1);
+    assert!(runtime_status.recoveries.continuity_invalidated);
     drop(outbound_tx);
     let _ = shutdown.send(());
 }
@@ -1211,6 +1314,7 @@ where
             bind_addr: addr.to_string(),
             artifact_dir,
             default_mode: SessionMode::EnterpriseUi,
+            artifact_retention: ArtifactRetentionPolicy::default(),
         },
         backend,
     )?;

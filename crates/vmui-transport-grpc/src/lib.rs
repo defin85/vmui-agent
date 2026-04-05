@@ -17,6 +17,8 @@ pub enum ConvertError {
     InvalidEnumValue { field: &'static str, value: i32 },
     #[error("unsupported action kind `{0}`")]
     UnsupportedActionKind(String),
+    #[error("unsupported action status `{0}`")]
+    UnsupportedActionStatus(String),
     #[error("unsupported diff op `{0}`")]
     UnsupportedDiffOp(String),
     #[error("invalid json in `{field}`: {source}")]
@@ -86,6 +88,20 @@ impl From<domain::HelloAck> for pb::HelloAck {
     }
 }
 
+impl TryFrom<pb::HelloAck> for domain::HelloAck {
+    type Error = ConvertError;
+
+    fn try_from(value: pb::HelloAck) -> Result<Self, Self::Error> {
+        Ok(Self {
+            session_id: value.session_id.into(),
+            server_version: value.server_version,
+            backend_id: value.backend_id,
+            capabilities: value.capabilities,
+            negotiated_mode: decode_session_mode(value.negotiated_mode)?,
+        })
+    }
+}
+
 impl TryFrom<pb::Subscribe> for domain::Subscribe {
     type Error = ConvertError;
 
@@ -149,6 +165,17 @@ impl From<domain::WarningEvent> for pb::Warning {
     }
 }
 
+impl TryFrom<pb::Warning> for domain::WarningEvent {
+    type Error = ConvertError;
+
+    fn try_from(value: pb::Warning) -> Result<Self, Self::Error> {
+        Ok(Self {
+            code: value.code,
+            message: value.message,
+        })
+    }
+}
+
 impl TryFrom<pb::ClientMsg> for domain::ClientMessage {
     type Error = ConvertError;
 
@@ -194,6 +221,32 @@ impl From<domain::ServerMessage> for pb::ServerMsg {
         };
         Self {
             payload: Some(payload),
+        }
+    }
+}
+
+impl TryFrom<pb::ServerMsg> for domain::ServerMessage {
+    type Error = ConvertError;
+
+    fn try_from(value: pb::ServerMsg) -> Result<Self, Self::Error> {
+        match value.payload.ok_or(ConvertError::MissingPayload)? {
+            pb::server_msg::Payload::HelloAck(hello_ack) => {
+                Ok(Self::HelloAck(hello_ack.try_into()?))
+            }
+            pb::server_msg::Payload::InitialSnapshot(snapshot) => {
+                Ok(Self::InitialSnapshot(snapshot.try_into()?))
+            }
+            pb::server_msg::Payload::DiffBatch(diff_batch) => {
+                Ok(Self::DiffBatch(diff_batch.try_into()?))
+            }
+            pb::server_msg::Payload::ActionResult(action_result) => {
+                Ok(Self::ActionResult(action_result.try_into()?))
+            }
+            pb::server_msg::Payload::ArtifactReady(artifact) => {
+                Ok(Self::ArtifactReady(artifact.try_into()?))
+            }
+            pb::server_msg::Payload::Warning(warning) => Ok(Self::Warning(warning.try_into()?)),
+            pb::server_msg::Payload::Pong(_) => Ok(Self::Pong),
         }
     }
 }
@@ -660,10 +713,32 @@ impl From<domain::ArtifactChunk> for pb::ArtifactChunk {
     }
 }
 
+impl TryFrom<pb::ActionResult> for domain::ActionResult {
+    type Error = ConvertError;
+
+    fn try_from(value: pb::ActionResult) -> Result<Self, Self::Error> {
+        Ok(Self {
+            action_id: value.action_id.into(),
+            ok: value.ok,
+            status: decode_action_status(&value.status)?,
+            message: value.message,
+            artifacts: value
+                .artifacts
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
 fn parse_action_kind(kind: &str, payload_json: &str) -> Result<domain::ActionKind, ConvertError> {
     match kind {
         "list_windows" => Ok(domain::ActionKind::ListWindows),
         "get_tree" => Ok(domain::ActionKind::GetTree(decode_json(
+            payload_json,
+            "action_request.payload_json",
+        )?)),
+        "get_runtime_status" => Ok(domain::ActionKind::GetRuntimeStatus(decode_json(
             payload_json,
             "action_request.payload_json",
         )?)),
@@ -728,6 +803,16 @@ fn decode_capture_policy(value: i32) -> Result<domain::CapturePolicy, ConvertErr
     }
 }
 
+fn decode_action_status(value: &str) -> Result<domain::ActionStatus, ConvertError> {
+    match value {
+        "completed" => Ok(domain::ActionStatus::Completed),
+        "failed" => Ok(domain::ActionStatus::Failed),
+        "timed_out" => Ok(domain::ActionStatus::TimedOut),
+        "unsupported" => Ok(domain::ActionStatus::Unsupported),
+        other => Err(ConvertError::UnsupportedActionStatus(other.to_owned())),
+    }
+}
+
 fn encode_backend_kind(value: domain::BackendKind) -> String {
     match value {
         domain::BackendKind::Uia => "uia".to_owned(),
@@ -753,6 +838,9 @@ pub fn encode_action_request(
     let (kind, payload_json) = match &value.kind {
         domain::ActionKind::ListWindows => ("list_windows".to_owned(), String::new()),
         domain::ActionKind::GetTree(payload) => ("get_tree".to_owned(), encode_json(payload)?),
+        domain::ActionKind::GetRuntimeStatus(payload) => {
+            ("get_runtime_status".to_owned(), encode_json(payload)?)
+        }
         domain::ActionKind::FocusWindow => ("focus_window".to_owned(), String::new()),
         domain::ActionKind::ClickElement(payload) => {
             ("click_element".to_owned(), encode_json(payload)?)
@@ -818,8 +906,8 @@ mod tests {
     use vmui_protocol::{
         ActionId, ActionKind, ActionRequest, ActionTarget, BackendKind, CapturePolicy,
         DiagnosticBundleOptions, DiagnosticStepVerdict, ElementId, ElementNode, ElementStates,
-        Locator, PropertyValue, Rect, SessionId, SessionMode, TreeRequest, UiSnapshot, WindowId,
-        WindowState,
+        Locator, PropertyValue, Rect, RuntimeStatusRequest, SessionId, SessionMode, TreeRequest,
+        UiSnapshot, WindowId, WindowState,
     };
 
     use super::*;
@@ -936,6 +1024,22 @@ mod tests {
     }
 
     #[test]
+    fn runtime_status_action_roundtrip_preserves_empty_payload() {
+        let request = ActionRequest {
+            action_id: ActionId::from("runtime-1"),
+            timeout_ms: 500,
+            target: ActionTarget::Desktop,
+            kind: ActionKind::GetRuntimeStatus(RuntimeStatusRequest::default()),
+            capture_policy: CapturePolicy::Never,
+        };
+
+        let proto = encode_action_request(&request).expect("encode request");
+        let decoded: ActionRequest = proto.try_into().expect("decode request");
+
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
     fn server_message_wraps_snapshot_payload() {
         let message = domain::ServerMessage::InitialSnapshot(sample_snapshot());
         let wire: pb::ServerMsg = message.into();
@@ -965,6 +1069,37 @@ mod tests {
             domain::ClientMessage::Hello(hello) => {
                 assert_eq!(hello.client_name, "test");
                 assert_eq!(hello.requested_mode, SessionMode::EnterpriseUi);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_message_decodes_action_result() {
+        let wire = pb::ServerMsg {
+            payload: Some(pb::server_msg::Payload::ActionResult(pb::ActionResult {
+                action_id: "act-1".to_owned(),
+                ok: false,
+                status: "timed_out".to_owned(),
+                message: "expired".to_owned(),
+                artifacts: vec![pb::ArtifactReady {
+                    artifact_id: "art-1".to_owned(),
+                    kind: "runtime-status-json".to_owned(),
+                    mime_type: "application/json".to_owned(),
+                    size_bytes: 42,
+                }],
+            })),
+        };
+
+        let decoded = domain::ServerMessage::try_from(wire).expect("decode server message");
+
+        match decoded {
+            domain::ServerMessage::ActionResult(result) => {
+                assert_eq!(result.action_id, ActionId::from("act-1"));
+                assert!(!result.ok);
+                assert_eq!(result.status, domain::ActionStatus::TimedOut);
+                assert_eq!(result.artifacts.len(), 1);
+                assert_eq!(result.artifacts[0].kind, "runtime-status-json");
             }
             other => panic!("unexpected message: {other:?}"),
         }

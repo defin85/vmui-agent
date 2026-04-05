@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::json;
 use tokio::{
     sync::{mpsc, watch, RwLock},
-    time::{timeout, Instant},
+    time::{interval, timeout, Instant, MissedTickBehavior},
 };
 use tokio_stream::{iter, wrappers::ReceiverStream};
 use tonic::{transport::Server, Request, Response, Status};
@@ -63,11 +63,15 @@ where
         action: domain::ActionRequest,
     ) -> Result<domain::ActionResult, Status> {
         let action = self.enrich_action_target(context, action).await;
-
-        match action.kind.clone() {
+        let action_label = action_kind_label(&action.kind);
+        let result = match action.kind.clone() {
             domain::ActionKind::ListWindows => self.execute_list_windows(context, action).await,
             domain::ActionKind::GetTree(request) => {
                 self.execute_get_tree(context, action, request).await
+            }
+            domain::ActionKind::GetRuntimeStatus(request) => {
+                self.execute_get_runtime_status(context, action, request)
+                    .await
             }
             domain::ActionKind::WaitFor(options) => {
                 self.execute_wait_for(context, action, options).await
@@ -85,7 +89,14 @@ where
                 self.execute_unsupported_ocr(context, action, options).await
             }
             _ => self.execute_backend_action(context, action).await,
+        }?;
+
+        {
+            let mut state = self.state.write().await;
+            state.record_action_result(action_label, &result.status);
         }
+
+        Ok(result)
     }
 
     async fn enrich_action_target(
@@ -161,6 +172,10 @@ where
             .await
             .map_err(internal_status)?;
         normalize_snapshot_revision(&mut snapshot, current_rev);
+        {
+            let mut state = self.state.write().await;
+            state.record_snapshot_observation(snapshot_fallback_surface_count(&snapshot));
+        }
         Ok(snapshot)
     }
 
@@ -219,6 +234,36 @@ where
             ok: true,
             status: domain::ActionStatus::Completed,
             message: "stored requested tree".to_owned(),
+            artifacts,
+        })
+    }
+
+    async fn execute_get_runtime_status(
+        &self,
+        context: &SessionContext,
+        action: domain::ActionRequest,
+        _request: domain::RuntimeStatusRequest,
+    ) -> Result<domain::ActionResult, Status> {
+        let status_report = {
+            let state = self.state.read().await;
+            state.runtime_status()
+        };
+        let artifacts = {
+            let mut state = self.state.write().await;
+            vec![write_json_artifact(
+                &mut state,
+                Some(context.session_id.clone()),
+                "runtime-status-json",
+                &status_report,
+            )
+            .map_err(internal_status)?]
+        };
+
+        Ok(domain::ActionResult {
+            action_id: action.action_id,
+            ok: true,
+            status: domain::ActionStatus::Completed,
+            message: "stored runtime status report".to_owned(),
             artifacts,
         })
     }
@@ -756,6 +801,9 @@ where
                             .sessions
                             .apply_snapshot(&context.session_id, snapshot.clone())
                             .map_err(internal_status)?;
+                        state.record_snapshot_observation(snapshot_fallback_surface_count(
+                            &snapshot,
+                        ));
                     }
                     let _ = context.revision_tx.send(snapshot.rev);
 
@@ -802,6 +850,13 @@ where
                         .await?;
                 }
                 domain::ClientMessage::ReadArtifact(_) => {
+                    {
+                        let mut state = self.state.write().await;
+                        state.record_warning(
+                            "use_read_artifact_rpc",
+                            "artifact payloads are served via the dedicated ReadArtifact RPC",
+                        );
+                    }
                     send_server_message(
                         &tx,
                         domain::ServerMessage::Warning(domain::WarningEvent {
@@ -910,6 +965,11 @@ where
         .parse()
         .with_context(|| format!("invalid bind address `{}`", config.bind_addr))?;
     let service = UiAgentService::new(config.clone(), backend)?;
+    let cleanup_state = service.state_handle();
+    let cleanup_interval = config.artifact_retention.cleanup_interval_seconds.max(1);
+    let cleanup_task = tokio::spawn(async move {
+        artifact_cleanup_loop(cleanup_state, cleanup_interval).await;
+    });
 
     info!(
         bind_addr = %addr,
@@ -923,6 +983,7 @@ where
         .serve_with_shutdown(addr, shutdown_signal())
         .await
         .context("gRPC server failed")?;
+    cleanup_task.abort();
 
     Ok(())
 }
@@ -1662,6 +1723,33 @@ fn collect_fallback_surfaces_from_node(
     }
 }
 
+fn snapshot_fallback_surface_count(snapshot: &domain::UiSnapshot) -> usize {
+    collect_fallback_surfaces(snapshot, &domain::ActionTarget::Desktop).len()
+}
+
+fn diff_fallback_surface_count(diff: &domain::UiDiffBatch) -> usize {
+    diff.ops
+        .iter()
+        .filter(|op| match op {
+            domain::DiffOp::WindowAdded { window } => node_contains_fallback_surface(&window.root),
+            domain::DiffOp::NodeAdded { node, .. } | domain::DiffOp::NodeReplaced { node, .. } => {
+                node_contains_fallback_surface(node)
+            }
+            domain::DiffOp::PropertyChanged { field, value, .. } => {
+                field == "onec_fallback_reason" && !matches!(value, domain::PropertyValue::Null)
+            }
+            _ => false,
+        })
+        .count()
+}
+
+fn node_contains_fallback_surface(node: &domain::ElementNode) -> bool {
+    property_string(&node.properties, "onec_fallback_reason").is_some()
+        || node.backend != domain::BackendKind::Uia
+        || node.confidence < 0.6
+        || node.children.iter().any(node_contains_fallback_surface)
+}
+
 fn wait_condition_matches(
     snapshot: &domain::UiSnapshot,
     target: &domain::ActionTarget,
@@ -1745,6 +1833,7 @@ fn should_attach_snapshot_artifact(
         kind,
         domain::ActionKind::ListWindows
             | domain::ActionKind::GetTree(_)
+            | domain::ActionKind::GetRuntimeStatus(_)
             | domain::ActionKind::WriteArtifact(_)
             | domain::ActionKind::CollectDiagnosticBundle(_)
             | domain::ActionKind::CaptureRegion(_)
@@ -1873,6 +1962,7 @@ fn action_kind_label(kind: &domain::ActionKind) -> &'static str {
     match kind {
         domain::ActionKind::ListWindows => "list_windows",
         domain::ActionKind::GetTree(_) => "get_tree",
+        domain::ActionKind::GetRuntimeStatus(_) => "get_runtime_status",
         domain::ActionKind::FocusWindow => "focus_window",
         domain::ActionKind::ClickElement(_) => "click_element",
         domain::ActionKind::SetValue(_) => "set_value",
@@ -1903,7 +1993,11 @@ async fn forward_backend_events<B>(
             BackendEvent::Diff(diff) => {
                 let update_result = {
                     let mut state = state.write().await;
-                    state.sessions.apply_diff(&session_id, &diff)
+                    let result = state.sessions.apply_diff(&session_id, &diff);
+                    if result.is_ok() {
+                        state.record_snapshot_observation(diff_fallback_surface_count(&diff));
+                    }
+                    result
                 };
 
                 match update_result {
@@ -1920,7 +2014,9 @@ async fn forward_backend_events<B>(
                     }
                     Err(error) => {
                         let current_rev = {
-                            let state = state.read().await;
+                            let mut state = state.write().await;
+                            state.record_resync(error.to_string());
+                            state.record_warning("session_resync_required", error.to_string());
                             state
                                 .sessions
                                 .state(&session_id)
@@ -1959,7 +2055,16 @@ async fn forward_backend_events<B>(
                                         .map(|record| record.revision())
                                         .unwrap_or(0);
                                     normalize_snapshot_revision(&mut snapshot, current_rev);
-                                    state.sessions.apply_snapshot(&session_id, snapshot.clone())
+                                    let result = state
+                                        .sessions
+                                        .apply_snapshot(&session_id, snapshot.clone());
+                                    if result.is_ok() {
+                                        state.record_snapshot_observation(
+                                            snapshot_fallback_surface_count(&snapshot),
+                                        );
+                                        state.record_recovery(reason.clone(), true);
+                                    }
+                                    result
                                 };
 
                                 match apply_result {
@@ -1976,14 +2081,26 @@ async fn forward_backend_events<B>(
                                                 break;
                                             }
                                         }
+                                        if send_warning_event(
+                                            &state,
+                                            &tx,
+                                            "session_state_recovered",
+                                            format!(
+                                                "session state recovered after resync; continuity_invalidated=true; reason={reason}"
+                                            ),
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            break;
+                                        }
                                     }
                                     Err(snapshot_error) => {
-                                        if send_server_message(
+                                        if send_warning_event(
+                                            &state,
                                             &tx,
-                                            domain::ServerMessage::Warning(domain::WarningEvent {
-                                                code: "session_resync_apply_failed".to_owned(),
-                                                message: snapshot_error.to_string(),
-                                            }),
+                                            "session_resync_apply_failed",
+                                            snapshot_error.to_string(),
                                         )
                                         .await
                                         .is_err()
@@ -1994,12 +2111,11 @@ async fn forward_backend_events<B>(
                                 }
                             }
                             Err(refresh_error) => {
-                                if send_server_message(
+                                if send_warning_event(
+                                    &state,
                                     &tx,
-                                    domain::ServerMessage::Warning(domain::WarningEvent {
-                                        code: "session_resync_refresh_failed".to_owned(),
-                                        message: refresh_error.to_string(),
-                                    }),
+                                    "session_resync_refresh_failed",
+                                    refresh_error.to_string(),
                                 )
                                 .await
                                 .is_err()
@@ -2012,12 +2128,9 @@ async fn forward_backend_events<B>(
                 }
             }
             BackendEvent::Warning { code, message } => {
-                if send_server_message(
-                    &tx,
-                    domain::ServerMessage::Warning(domain::WarningEvent { code, message }),
-                )
-                .await
-                .is_err()
+                if send_warning_event(&state, &tx, code, message)
+                    .await
+                    .is_err()
                 {
                     break;
                 }
@@ -2035,9 +2148,62 @@ async fn send_server_message(
         .map_err(|_| Status::cancelled("session stream closed"))
 }
 
+async fn send_warning_event(
+    state: &SharedState,
+    tx: &mpsc::Sender<Result<pb::ServerMsg, Status>>,
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> Result<(), Status> {
+    let code = code.into();
+    let message = message.into();
+    {
+        let mut state = state.write().await;
+        state.record_warning(code.clone(), message.clone());
+    }
+    send_server_message(
+        tx,
+        domain::ServerMessage::Warning(domain::WarningEvent { code, message }),
+    )
+    .await
+}
+
+async fn artifact_cleanup_loop(state: SharedState, cleanup_interval_seconds: u64) {
+    let mut ticker = interval(Duration::from_secs(cleanup_interval_seconds.max(1)));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    ticker.tick().await;
+
+    loop {
+        ticker.tick().await;
+        let cleanup_result = {
+            let mut state = state.write().await;
+            state.cleanup_artifacts("periodic_retention_cleanup")
+        };
+        match cleanup_result {
+            Ok(outcome) if outcome.removed_count > 0 => {
+                let mut state = state.write().await;
+                state.record_warning(
+                    "artifact_retention_cleanup",
+                    format!(
+                        "removed {} artifact(s) / {} bytes during {}",
+                        outcome.removed_count, outcome.removed_bytes, outcome.reason
+                    ),
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                let mut state = state.write().await;
+                state.record_warning("artifact_cleanup_failed", error.to_string());
+                warn!(%error, "artifact cleanup failed");
+            }
+        }
+    }
+}
+
 fn backend_capabilities<B: UiBackend>(backend: &B) -> Vec<String> {
     let capabilities = backend.capabilities();
     let mut labels = vec!["grpc-session".to_owned(), "artifact-read".to_owned()];
+    labels.push("runtime-status".to_owned());
+    labels.push("artifact-retention".to_owned());
     if capabilities.supports_live_observer {
         labels.push("observer-active".to_owned());
     } else {

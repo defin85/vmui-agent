@@ -8,8 +8,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use vmui_protocol::{
-    ArtifactDescriptor, ArtifactId, DiffOp, ElementId, ElementNode, PropertyValue, Revision,
-    SessionId, SessionMode, UiDiffBatch, UiSnapshot, WindowId, WindowState,
+    ActionOutcomeSummary, ActionStatus, ArtifactDescriptor, ArtifactId, ArtifactStorePressureState,
+    ArtifactStoreStatus, DiffOp, ElementId, ElementNode, PropertyValue, Revision,
+    RuntimeHealthState, RuntimeHealthSummary, RuntimeObservationSummary, RuntimeRecoverySummary,
+    RuntimeStatusReport, RuntimeWarningSummary, SessionId, SessionMode, UiDiffBatch, UiSnapshot,
+    WindowId, WindowState,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -17,6 +20,7 @@ pub struct AgentConfig {
     pub bind_addr: String,
     pub artifact_dir: PathBuf,
     pub default_mode: SessionMode,
+    pub artifact_retention: ArtifactRetentionPolicy,
 }
 
 impl Default for AgentConfig {
@@ -25,6 +29,26 @@ impl Default for AgentConfig {
             bind_addr: "127.0.0.1:50051".to_owned(),
             artifact_dir: PathBuf::from("var/artifacts"),
             default_mode: SessionMode::EnterpriseUi,
+            artifact_retention: ArtifactRetentionPolicy::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactRetentionPolicy {
+    pub max_age_seconds: u64,
+    pub max_bytes: u64,
+    pub max_count: usize,
+    pub cleanup_interval_seconds: u64,
+}
+
+impl Default for ArtifactRetentionPolicy {
+    fn default() -> Self {
+        Self {
+            max_age_seconds: 24 * 60 * 60,
+            max_bytes: 256 * 1024 * 1024,
+            max_count: 512,
+            cleanup_interval_seconds: 5 * 60,
         }
     }
 }
@@ -257,6 +281,20 @@ impl SessionRegistry {
     pub fn session_ids(&self) -> Vec<SessionId> {
         self.sessions.keys().cloned().collect()
     }
+
+    pub fn active_len(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|record| record.runtime.closed_at.is_none())
+            .count()
+    }
+
+    pub fn resync_required_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|record| record.state.resync_reason().is_some())
+            .count()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -275,26 +313,61 @@ pub struct ArtifactRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ArtifactCleanupOutcome {
+    pub removed_count: usize,
+    pub removed_bytes: u64,
+    pub remaining_count: usize,
+    pub remaining_bytes: u64,
+    pub ran_at: DateTime<Utc>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ArtifactStoreMetrics {
+    total_written_bytes: u64,
+    deleted_artifact_count: u64,
+    deleted_bytes: u64,
+    cleanup_runs: u64,
+    last_cleanup_at: Option<DateTime<Utc>>,
+    last_cleanup_reason: Option<String>,
+}
+
 pub struct ArtifactStore {
     root: PathBuf,
     artifacts: BTreeMap<ArtifactId, ArtifactRecord>,
+    retention: ArtifactRetentionPolicy,
+    metrics: ArtifactStoreMetrics,
+    total_bytes: u64,
 }
 
 impl ArtifactStore {
-    pub fn new(root: impl Into<PathBuf>) -> Result<Self, ArtifactError> {
+    pub fn new(
+        root: impl Into<PathBuf>,
+        retention: ArtifactRetentionPolicy,
+    ) -> Result<Self, ArtifactError> {
         let root = root.into();
         fs::create_dir_all(&root).map_err(|source| ArtifactError::CreateDir {
             path: root.clone(),
             source,
         })?;
-        Ok(Self {
+        let mut store = Self {
             root,
             artifacts: BTreeMap::new(),
-        })
+            retention,
+            metrics: ArtifactStoreMetrics::default(),
+            total_bytes: 0,
+        };
+        store.startup_sweep()?;
+        Ok(store)
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn retention(&self) -> &ArtifactRetentionPolicy {
+        &self.retention
     }
 
     pub fn write_bytes(
@@ -326,7 +399,10 @@ impl ArtifactStore {
             path,
             created_at: Utc::now(),
         };
+        self.total_bytes += descriptor.size_bytes;
+        self.metrics.total_written_bytes += descriptor.size_bytes;
         self.artifacts.insert(artifact_id, record);
+        let _ = self.cleanup("retention_enforced_after_write")?;
         Ok(descriptor)
     }
 
@@ -346,6 +422,144 @@ impl ArtifactStore {
             source,
         })
     }
+
+    pub fn cleanup(
+        &mut self,
+        reason: impl Into<String>,
+    ) -> Result<ArtifactCleanupOutcome, ArtifactError> {
+        let reason = reason.into();
+        let now = Utc::now();
+        let mut records = self
+            .artifacts
+            .iter()
+            .map(|(artifact_id, record)| (artifact_id.clone(), record.clone()))
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            left.1
+                .created_at
+                .cmp(&right.1.created_at)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+
+        let max_age_cutoff = now
+            - chrono::Duration::seconds(self.retention.max_age_seconds.min(i64::MAX as u64) as i64);
+        let mut remove_ids = Vec::new();
+        let mut remaining_count = records.len();
+        let mut remaining_bytes = self.total_bytes;
+
+        for (artifact_id, record) in &records {
+            if record.created_at < max_age_cutoff {
+                remaining_count = remaining_count.saturating_sub(1);
+                remaining_bytes = remaining_bytes.saturating_sub(record.descriptor.size_bytes);
+                remove_ids.push(artifact_id.clone());
+            }
+        }
+
+        for (artifact_id, record) in &records {
+            if remove_ids.iter().any(|candidate| candidate == artifact_id) {
+                continue;
+            }
+
+            let over_count = remaining_count > self.retention.max_count;
+            let over_bytes = remaining_bytes > self.retention.max_bytes;
+            if !over_count && !over_bytes {
+                continue;
+            }
+
+            remaining_count = remaining_count.saturating_sub(1);
+            remaining_bytes = remaining_bytes.saturating_sub(record.descriptor.size_bytes);
+            remove_ids.push(artifact_id.clone());
+        }
+
+        let mut removed_count = 0usize;
+        let mut removed_bytes = 0u64;
+        for artifact_id in remove_ids {
+            let Some(record) = self.artifacts.remove(&artifact_id) else {
+                continue;
+            };
+            remove_artifact_path(&record.path)?;
+            removed_count += 1;
+            removed_bytes += record.descriptor.size_bytes;
+        }
+
+        self.total_bytes = self
+            .artifacts
+            .values()
+            .map(|record| record.descriptor.size_bytes)
+            .sum();
+        self.metrics.cleanup_runs += 1;
+        self.metrics.deleted_artifact_count += removed_count as u64;
+        self.metrics.deleted_bytes += removed_bytes;
+        self.metrics.last_cleanup_at = Some(now);
+        self.metrics.last_cleanup_reason = Some(reason.clone());
+
+        Ok(ArtifactCleanupOutcome {
+            removed_count,
+            removed_bytes,
+            remaining_count: self.artifacts.len(),
+            remaining_bytes: self.total_bytes,
+            ran_at: now,
+            reason,
+        })
+    }
+
+    pub fn status(&self) -> ArtifactStoreStatus {
+        ArtifactStoreStatus {
+            artifact_count: self.artifacts.len(),
+            total_bytes: self.total_bytes,
+            max_count: self.retention.max_count,
+            max_bytes: self.retention.max_bytes,
+            max_age_seconds: self.retention.max_age_seconds,
+            cleanup_interval_seconds: self.retention.cleanup_interval_seconds,
+            cleanup_runs: self.metrics.cleanup_runs,
+            deleted_artifact_count: self.metrics.deleted_artifact_count,
+            deleted_bytes: self.metrics.deleted_bytes,
+            last_cleanup_at: self.metrics.last_cleanup_at,
+            last_cleanup_reason: self.metrics.last_cleanup_reason.clone(),
+            pressure_state: artifact_pressure_state(
+                self.artifacts.len(),
+                self.total_bytes,
+                &self.retention,
+            ),
+        }
+    }
+
+    fn startup_sweep(&mut self) -> Result<(), ArtifactError> {
+        let mut removed_count = 0u64;
+        let mut removed_bytes = 0u64;
+        let entries = fs::read_dir(&self.root).map_err(|source| ArtifactError::ReadDir {
+            path: self.root.clone(),
+            source,
+        })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|source| ArtifactError::ReadDirEntry {
+                path: self.root.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let metadata = fs::metadata(&path).map_err(|source| ArtifactError::Metadata {
+                path: path.clone(),
+                source,
+            })?;
+            remove_artifact_path(&path)?;
+            removed_count += 1;
+            removed_bytes += metadata.len();
+        }
+
+        if removed_count > 0 {
+            self.metrics.cleanup_runs += 1;
+            self.metrics.deleted_artifact_count += removed_count;
+            self.metrics.deleted_bytes += removed_bytes;
+            self.metrics.last_cleanup_at = Some(Utc::now());
+            self.metrics.last_cleanup_reason = Some("startup_orphan_sweep".to_owned());
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Error)]
@@ -362,24 +576,264 @@ pub enum ArtifactError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("failed to list artifact dir `{path}`: {source}")]
+    ReadDir {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to inspect artifact dir entry in `{path}`: {source}")]
+    ReadDirEntry {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("failed to read artifact file `{path}`: {source}")]
     ReadFile {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("failed to inspect artifact file `{path}`: {source}")]
+    Metadata {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to delete artifact file `{path}`: {source}")]
+    DeleteFile {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RuntimeTelemetry {
+    resync_count: u64,
+    last_resync_at: Option<DateTime<Utc>>,
+    last_resync_reason: Option<String>,
+    recovery_count: u64,
+    continuity_invalidated_count: u64,
+    last_recovery_at: Option<DateTime<Utc>>,
+    last_recovery_reason: Option<String>,
+    warning_counts_by_code: BTreeMap<String, u64>,
+    warning_counts_by_class: BTreeMap<String, u64>,
+    total_warning_count: u64,
+    last_warning_at: Option<DateTime<Utc>>,
+    last_warning_code: Option<String>,
+    last_warning_message: Option<String>,
+    action_outcomes: BTreeMap<String, ActionOutcomeSummary>,
+    snapshot_count: u64,
+    fallback_heavy_snapshot_count: u64,
+    last_fallback_heavy_at: Option<DateTime<Utc>>,
+    last_fallback_surface_count: usize,
+    continuity_invalidated: bool,
 }
 
 pub struct AgentRuntimeState {
     pub sessions: SessionRegistry,
     pub artifacts: ArtifactStore,
+    pub telemetry: RuntimeTelemetry,
 }
 
 impl AgentRuntimeState {
     pub fn new(config: &AgentConfig) -> Result<Self, ArtifactError> {
         Ok(Self {
             sessions: SessionRegistry::default(),
-            artifacts: ArtifactStore::new(config.artifact_dir.clone())?,
+            artifacts: ArtifactStore::new(
+                config.artifact_dir.clone(),
+                config.artifact_retention.clone(),
+            )?,
+            telemetry: RuntimeTelemetry::default(),
         })
+    }
+
+    pub fn cleanup_artifacts(
+        &mut self,
+        reason: impl Into<String>,
+    ) -> Result<ArtifactCleanupOutcome, ArtifactError> {
+        self.artifacts.cleanup(reason)
+    }
+
+    pub fn record_warning(&mut self, code: impl Into<String>, message: impl Into<String>) {
+        let code = code.into();
+        let message = message.into();
+        let class = classify_warning_code(&code);
+        let now = Utc::now();
+        *self
+            .telemetry
+            .warning_counts_by_code
+            .entry(code.clone())
+            .or_default() += 1;
+        *self
+            .telemetry
+            .warning_counts_by_class
+            .entry(class.to_owned())
+            .or_default() += 1;
+        self.telemetry.total_warning_count += 1;
+        self.telemetry.last_warning_at = Some(now);
+        self.telemetry.last_warning_code = Some(code);
+        self.telemetry.last_warning_message = Some(message);
+    }
+
+    pub fn record_resync(&mut self, reason: impl Into<String>) {
+        self.telemetry.resync_count += 1;
+        self.telemetry.last_resync_at = Some(Utc::now());
+        self.telemetry.last_resync_reason = Some(reason.into());
+    }
+
+    pub fn record_recovery(&mut self, reason: impl Into<String>, continuity_invalidated: bool) {
+        self.telemetry.recovery_count += 1;
+        self.telemetry.last_recovery_at = Some(Utc::now());
+        self.telemetry.last_recovery_reason = Some(reason.into());
+        self.telemetry.continuity_invalidated = continuity_invalidated;
+        if continuity_invalidated {
+            self.telemetry.continuity_invalidated_count += 1;
+        }
+    }
+
+    pub fn record_action_result(&mut self, action: &str, status: &ActionStatus) {
+        let entry = self
+            .telemetry
+            .action_outcomes
+            .entry(action.to_owned())
+            .or_insert_with(|| ActionOutcomeSummary {
+                action: action.to_owned(),
+                completed: 0,
+                failed: 0,
+                timed_out: 0,
+                unsupported: 0,
+            });
+
+        match status {
+            ActionStatus::Completed => entry.completed += 1,
+            ActionStatus::Failed => entry.failed += 1,
+            ActionStatus::TimedOut => entry.timed_out += 1,
+            ActionStatus::Unsupported => entry.unsupported += 1,
+        }
+    }
+
+    pub fn record_snapshot_observation(&mut self, fallback_surface_count: usize) {
+        const FALLBACK_HEAVY_SURFACE_THRESHOLD: usize = 2;
+
+        self.telemetry.snapshot_count += 1;
+        if fallback_surface_count >= FALLBACK_HEAVY_SURFACE_THRESHOLD {
+            self.telemetry.fallback_heavy_snapshot_count += 1;
+            self.telemetry.last_fallback_heavy_at = Some(Utc::now());
+            self.telemetry.last_fallback_surface_count = fallback_surface_count;
+        }
+    }
+
+    pub fn runtime_status(&self) -> RuntimeStatusReport {
+        let artifact_store = self.artifacts.status();
+        let mut reasons = Vec::new();
+        if self.sessions.resync_required_count() > 0 {
+            reasons.push("session_resync_required".to_owned());
+        }
+        if self.telemetry.resync_count > 0 {
+            reasons.push("resyncs_observed".to_owned());
+        }
+        if self.telemetry.fallback_heavy_snapshot_count > 0 {
+            reasons.push("fallback_heavy_observation".to_owned());
+        }
+        if self
+            .telemetry
+            .warning_counts_by_class
+            .get("backend")
+            .copied()
+            .unwrap_or_default()
+            > 0
+        {
+            reasons.push("backend_degradation".to_owned());
+        }
+        if artifact_store.pressure_state != ArtifactStorePressureState::Healthy {
+            reasons.push("artifact_store_pressure".to_owned());
+        }
+        reasons.sort();
+        reasons.dedup();
+
+        let status = if reasons.is_empty() {
+            RuntimeHealthState::Healthy
+        } else {
+            RuntimeHealthState::Degraded
+        };
+
+        let mut actions = self
+            .telemetry
+            .action_outcomes
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        actions.sort_by(|left, right| left.action.cmp(&right.action));
+
+        RuntimeStatusReport {
+            generated_at: Utc::now(),
+            session_count: self.sessions.len(),
+            active_session_count: self.sessions.active_len(),
+            active_resync_sessions: self.sessions.resync_required_count(),
+            health: RuntimeHealthSummary { status, reasons },
+            recoveries: RuntimeRecoverySummary {
+                resync_count: self.telemetry.resync_count,
+                last_resync_at: self.telemetry.last_resync_at,
+                last_resync_reason: self.telemetry.last_resync_reason.clone(),
+                recovery_count: self.telemetry.recovery_count,
+                continuity_invalidated_count: self.telemetry.continuity_invalidated_count,
+                last_recovery_at: self.telemetry.last_recovery_at,
+                last_recovery_reason: self.telemetry.last_recovery_reason.clone(),
+                continuity_invalidated: self.telemetry.continuity_invalidated,
+            },
+            warnings: RuntimeWarningSummary {
+                total_count: self.telemetry.total_warning_count,
+                by_code: self.telemetry.warning_counts_by_code.clone(),
+                by_class: self.telemetry.warning_counts_by_class.clone(),
+                last_warning_at: self.telemetry.last_warning_at,
+                last_warning_code: self.telemetry.last_warning_code.clone(),
+                last_warning_message: self.telemetry.last_warning_message.clone(),
+            },
+            observations: RuntimeObservationSummary {
+                snapshot_count: self.telemetry.snapshot_count,
+                fallback_heavy_snapshot_count: self.telemetry.fallback_heavy_snapshot_count,
+                last_fallback_heavy_at: self.telemetry.last_fallback_heavy_at,
+                last_fallback_surface_count: self.telemetry.last_fallback_surface_count,
+            },
+            actions,
+            artifact_store,
+        }
+    }
+}
+
+fn remove_artifact_path(path: &Path) -> Result<(), ArtifactError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(ArtifactError::DeleteFile {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn artifact_pressure_state(
+    artifact_count: usize,
+    total_bytes: u64,
+    retention: &ArtifactRetentionPolicy,
+) -> ArtifactStorePressureState {
+    if artifact_count > retention.max_count {
+        ArtifactStorePressureState::MaxCountExceeded
+    } else if total_bytes > retention.max_bytes {
+        ArtifactStorePressureState::MaxBytesExceeded
+    } else {
+        ArtifactStorePressureState::Healthy
+    }
+}
+
+fn classify_warning_code(code: &str) -> &'static str {
+    if code.contains("resync") || code.contains("recover") {
+        "resync"
+    } else if code.starts_with("backend_") {
+        "backend"
+    } else if code.starts_with("artifact_") {
+        "artifact_store"
+    } else if code.starts_with("session_") {
+        "session"
+    } else {
+        "general"
     }
 }
 
@@ -976,7 +1430,8 @@ mod tests {
     #[test]
     fn artifact_store_writes_and_reads_bytes() {
         let dir = tempdir().expect("tempdir");
-        let mut store = ArtifactStore::new(dir.path()).expect("artifact store");
+        let mut store = ArtifactStore::new(dir.path(), ArtifactRetentionPolicy::default())
+            .expect("artifact store");
         let descriptor = store
             .write_bytes(
                 Some(SessionId::new("sess")),
@@ -997,5 +1452,85 @@ mod tests {
                 .expect("descriptor must exist"),
             &descriptor
         );
+    }
+
+    #[test]
+    fn artifact_store_enforces_retention_limits() {
+        let dir = tempdir().expect("tempdir");
+        let mut store = ArtifactStore::new(
+            dir.path(),
+            ArtifactRetentionPolicy {
+                max_age_seconds: 24 * 60 * 60,
+                max_bytes: 8,
+                max_count: 1,
+                cleanup_interval_seconds: 1,
+            },
+        )
+        .expect("artifact store");
+
+        let first = store
+            .write_bytes(None, "log-text", "text/plain", b"1234")
+            .expect("write first");
+        let second = store
+            .write_bytes(None, "log-text", "text/plain", b"567890")
+            .expect("write second");
+
+        assert!(store.descriptor(&first.artifact_id).is_none());
+        assert!(store.descriptor(&second.artifact_id).is_some());
+        assert_eq!(store.status().artifact_count, 1);
+        assert_eq!(store.status().total_bytes, 6);
+    }
+
+    #[test]
+    fn runtime_status_reports_recovery_and_warning_summaries() {
+        let dir = tempdir().expect("tempdir");
+        let mut state = AgentRuntimeState::new(&AgentConfig {
+            bind_addr: "127.0.0.1:50051".to_owned(),
+            artifact_dir: dir.path().to_path_buf(),
+            default_mode: SessionMode::EnterpriseUi,
+            artifact_retention: ArtifactRetentionPolicy::default(),
+        })
+        .expect("runtime state");
+        let session_id = SessionId::new("sess");
+
+        state.sessions.open_session(SessionRuntime::new(
+            session_id.clone(),
+            SessionMode::EnterpriseUi,
+            "test-backend",
+        ));
+        state
+            .sessions
+            .apply_snapshot(&session_id, snapshot(session_id.clone(), 1))
+            .expect("apply snapshot");
+        state
+            .sessions
+            .state(&session_id)
+            .expect("state exists")
+            .snapshot()
+            .expect("snapshot exists");
+
+        state.record_warning("backend_degraded", "uia observer unavailable");
+        state.record_resync("stale diff");
+        state.record_recovery("observer restarted", true);
+        state.record_snapshot_observation(3);
+        state.record_action_result("wait_for", &ActionStatus::TimedOut);
+
+        let report = state.runtime_status();
+
+        assert_eq!(report.health.status, RuntimeHealthState::Degraded);
+        assert!(report
+            .health
+            .reasons
+            .iter()
+            .any(|reason| reason == "backend_degradation"));
+        assert_eq!(report.recoveries.resync_count, 1);
+        assert_eq!(report.recoveries.recovery_count, 1);
+        assert!(report.recoveries.continuity_invalidated);
+        assert_eq!(report.warnings.total_count, 1);
+        assert_eq!(report.warnings.by_class.get("backend"), Some(&1));
+        assert_eq!(report.observations.fallback_heavy_snapshot_count, 1);
+        assert_eq!(report.actions.len(), 1);
+        assert_eq!(report.actions[0].action, "wait_for");
+        assert_eq!(report.actions[0].timed_out, 1);
     }
 }
