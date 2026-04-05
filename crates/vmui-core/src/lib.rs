@@ -11,7 +11,7 @@ use vmui_protocol::{
     ActionOutcomeSummary, ActionStatus, ArtifactDescriptor, ArtifactId, ArtifactStorePressureState,
     ArtifactStoreStatus, DiffOp, ElementId, ElementNode, PropertyValue, Revision,
     RuntimeHealthState, RuntimeHealthSummary, RuntimeObservationSummary, RuntimeRecoverySummary,
-    RuntimeStatusReport, RuntimeWarningSummary, SessionId, SessionMode, UiDiffBatch, UiSnapshot,
+    RuntimeStatusReport, RuntimeWarningSummary, SessionId, SessionProfile, UiDiffBatch, UiSnapshot,
     WindowId, WindowState,
 };
 
@@ -19,7 +19,7 @@ use vmui_protocol::{
 pub struct AgentConfig {
     pub bind_addr: String,
     pub artifact_dir: PathBuf,
-    pub default_mode: SessionMode,
+    pub default_profile: SessionProfile,
     pub artifact_retention: ArtifactRetentionPolicy,
 }
 
@@ -28,7 +28,7 @@ impl Default for AgentConfig {
         Self {
             bind_addr: "127.0.0.1:50051".to_owned(),
             artifact_dir: PathBuf::from("var/artifacts"),
-            default_mode: SessionMode::EnterpriseUi,
+            default_profile: SessionProfile::generic_desktop(),
             artifact_retention: ArtifactRetentionPolicy::default(),
         }
     }
@@ -56,7 +56,7 @@ impl Default for ArtifactRetentionPolicy {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRuntime {
     pub session_id: SessionId,
-    pub mode: SessionMode,
+    pub profile: SessionProfile,
     pub backend_id: String,
     pub connected_at: DateTime<Utc>,
     pub subscribed_at: Option<DateTime<Utc>>,
@@ -66,10 +66,14 @@ pub struct SessionRuntime {
 }
 
 impl SessionRuntime {
-    pub fn new(session_id: SessionId, mode: SessionMode, backend_id: impl Into<String>) -> Self {
+    pub fn new(
+        session_id: SessionId,
+        profile: SessionProfile,
+        backend_id: impl Into<String>,
+    ) -> Self {
         Self {
             session_id,
-            mode,
+            profile,
             backend_id: backend_id.into(),
             connected_at: Utc::now(),
             subscribed_at: None,
@@ -1157,7 +1161,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
     use vmui_protocol::{
-        BackendKind, DiffOp, ElementId, ElementNode, ElementStates, Locator, Rect, SessionMode,
+        BackendKind, DiffOp, ElementId, ElementNode, ElementStates, Locator, Rect, SessionProfile,
         UiDiffBatch, WindowId, WindowState,
     };
 
@@ -1167,7 +1171,7 @@ mod tests {
         UiSnapshot {
             session_id,
             rev,
-            mode: SessionMode::EnterpriseUi,
+            profile: SessionProfile::onec_enterprise_ui(),
             captured_at: Utc
                 .timestamp_millis_opt(1_700_000_000_123)
                 .single()
@@ -1373,7 +1377,7 @@ mod tests {
         let mut registry = SessionRegistry::default();
         registry.open_session(SessionRuntime::new(
             session_id.clone(),
-            SessionMode::Configurator,
+            SessionProfile::onec_configurator(),
             "test-backend",
         ));
         registry
@@ -1387,7 +1391,7 @@ mod tests {
             .expect("close must succeed");
 
         let runtime = registry.runtime(&session_id).expect("runtime must exist");
-        assert_eq!(runtime.mode, SessionMode::Configurator);
+        assert_eq!(runtime.profile, SessionProfile::onec_configurator());
         assert_eq!(runtime.backend_id, "test-backend");
         assert_eq!(runtime.shallow, Some(true));
         assert_eq!(runtime.last_revision, Some(10));
@@ -1401,7 +1405,7 @@ mod tests {
         let mut registry = SessionRegistry::default();
         registry.open_session(SessionRuntime::new(
             session_id.clone(),
-            SessionMode::EnterpriseUi,
+            SessionProfile::onec_enterprise_ui(),
             "test-backend",
         ));
         registry
@@ -1487,7 +1491,7 @@ mod tests {
         let mut state = AgentRuntimeState::new(&AgentConfig {
             bind_addr: "127.0.0.1:50051".to_owned(),
             artifact_dir: dir.path().to_path_buf(),
-            default_mode: SessionMode::EnterpriseUi,
+            default_profile: SessionProfile::onec_enterprise_ui(),
             artifact_retention: ArtifactRetentionPolicy::default(),
         })
         .expect("runtime state");
@@ -1495,7 +1499,7 @@ mod tests {
 
         state.sessions.open_session(SessionRuntime::new(
             session_id.clone(),
-            SessionMode::EnterpriseUi,
+            SessionProfile::onec_enterprise_ui(),
             "test-backend",
         ));
         state

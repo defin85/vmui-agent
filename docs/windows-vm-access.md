@@ -121,6 +121,7 @@ Current scripts:
 - `scripts/vm/build.sh`: run `cargo` in the VM workdir
 - `scripts/vm/restart-agent.sh`: trigger the interactive daemon task
 - `scripts/vm/run-smoke.sh`: trigger the interactive smoke task
+- `scripts/vm/notepad-smoke.sh`: run the repo-tracked `Notepad -> focus_window -> send_keys -> clipboard verify` smoke against the interactive VM session
 - `scripts/vm/pull-artifacts.sh`: download a zip of logs and artifacts from the VM
 - `scripts/vm/windows/start-vmui-agent.ps1`: Windows-side task entrypoint for the daemon
 - `scripts/vm/windows/run-vmui-smoke.ps1`: Windows-side task entrypoint for smoke logging
@@ -134,7 +135,7 @@ cp scripts/vm/vm.env.example .vmui-vm.env
 ./scripts/vm/restart-agent.sh
 ./scripts/vm/tunnel.sh --background
 VMUI_DAEMON_ADDR=http://127.0.0.1:50051 cargo run -p vmui-mcp-proxy
-./scripts/vm/run-smoke.sh
+./scripts/vm/notepad-smoke.sh
 ./scripts/vm/pull-artifacts.sh --extract
 ```
 
@@ -167,6 +168,8 @@ Concrete commands live in:
 5. Open an SSH local forward from the host to `127.0.0.1:50051` on the VM.
 6. Run `vmui-mcp-proxy` locally against the forwarded daemon port.
 7. Execute smoke or exploratory checks.
+   - Canonical repo-tracked smoke:
+     `./scripts/vm/notepad-smoke.sh`
 8. Pull logs and artifacts back to the host if a failure occurs.
 
 ## Invariants

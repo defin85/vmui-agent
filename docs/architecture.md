@@ -2,7 +2,7 @@
 
 ## Goal
 
-Build a long-lived Windows UI agent that runs inside an interactive Windows 10 VM session and exposes a stateful debugger-like model of the UI for 1C application windows and Configurator.
+Build a long-lived Windows UI agent that runs inside an interactive Windows 10 VM session and exposes a stateful debugger-like model of the visible Windows desktop, with opt-in 1C-specific observation profiles for Enterprise UI and Configurator.
 
 ## Recommended Runtime Shape
 
@@ -49,8 +49,9 @@ UIA observer thread  WinEvent hook    MSAA fallback
 
 ### State Model
 
-- Snapshot-first, then diff stream.
+- Snapshot-first, then diff stream over a generic authoritative desktop inventory.
 - Session-stable element ids plus reusable locators.
+- Profile-aware session projection over that inventory.
 - Event notifications are hints; targeted refresh remains the source of truth.
 
 ### Fallback Strategy

@@ -17,8 +17,8 @@ use vmui_platform::{
     UiBackend,
 };
 use vmui_protocol::{
-    ActionRequest, ActionStatus, DiffOp, ElementId, ElementNode, LocatorSegment, PropertyValue,
-    SessionMode, UiDiffBatch, UiSnapshot, WindowId, WindowState,
+    ActionRequest, ActionStatus, DiffOp, DomainProfile, ElementId, ElementNode, LocatorSegment,
+    ObservationScope, PropertyValue, UiDiffBatch, UiSnapshot, WindowId, WindowLocator, WindowState,
 };
 
 pub struct WindowsBackend {
@@ -152,8 +152,8 @@ impl UiBackend for WindowsBackend {
     }
 
     async fn open_session(&self, params: BackendSessionParams) -> Result<BackendSession> {
-        let windows = self.source.capture_desktop(&params)?;
-        let initial_snapshot = snapshot_from_windows(&params, 1, windows);
+        let inventory = self.source.capture_desktop(&params)?;
+        let initial_snapshot = snapshot_from_inventory(&params, 1, &inventory);
         let (tx, rx) = mpsc::unbounded_channel();
 
         if let Some(message) = self.source.availability_warning() {
@@ -176,9 +176,17 @@ impl UiBackend for WindowsBackend {
             let source = Arc::clone(&self.source);
             let params = params.clone();
             let initial_snapshot_for_task = initial_snapshot.clone();
+            let initial_inventory_for_task = inventory.clone();
             tokio::spawn(async move {
-                observe_refreshes(source, params, initial_snapshot_for_task, subscription, tx)
-                    .await;
+                observe_refreshes(
+                    source,
+                    params,
+                    initial_inventory_for_task,
+                    initial_snapshot_for_task,
+                    subscription,
+                    tx,
+                )
+                .await;
             });
         }
 
@@ -189,8 +197,8 @@ impl UiBackend for WindowsBackend {
     }
 
     async fn capture_snapshot(&self, params: BackendSessionParams) -> Result<UiSnapshot> {
-        let windows = self.source.capture_desktop(&params)?;
-        Ok(snapshot_from_windows(&params, 1, windows))
+        let inventory = self.source.capture_desktop(&params)?;
+        Ok(snapshot_from_inventory(&params, 1, &inventory))
     }
 
     async fn perform_action(&self, action: ActionRequest) -> Result<BackendActionResult> {
@@ -231,16 +239,17 @@ fn unsupported_action(action: ActionRequest, message: impl Into<String>) -> Back
 async fn observe_refreshes(
     source: Arc<dyn ObservationSource>,
     params: BackendSessionParams,
+    mut current_inventory: Vec<WindowState>,
     mut current_snapshot: UiSnapshot,
     mut subscription: RefreshSubscription,
     tx: mpsc::UnboundedSender<BackendEvent>,
 ) {
     while let Some(requests) = next_refresh_batch(&mut subscription.receiver).await {
-        let mut next_windows = current_snapshot.windows.clone();
+        let mut next_inventory = current_inventory.clone();
 
         for request in requests {
             if let Err(error) =
-                apply_refresh_request(source.as_ref(), &params, &mut next_windows, &request)
+                apply_refresh_request(source.as_ref(), &params, &mut next_inventory, &request)
             {
                 if tx
                     .send(BackendEvent::Warning {
@@ -254,11 +263,11 @@ async fn observe_refreshes(
             }
         }
 
-        sort_windows(&mut next_windows);
         let next_rev = current_snapshot.rev.saturating_add(1);
-        let next_snapshot = snapshot_from_windows(&params, next_rev, next_windows);
+        let next_snapshot = snapshot_from_inventory(&params, next_rev, &next_inventory);
         let ops = diff_snapshots(&current_snapshot, &next_snapshot);
         if ops.is_empty() {
+            current_inventory = next_inventory;
             continue;
         }
 
@@ -269,6 +278,7 @@ async fn observe_refreshes(
             ops,
         };
 
+        current_inventory = next_inventory;
         current_snapshot = next_snapshot;
 
         if tx.send(BackendEvent::Diff(diff)).is_err() {
@@ -383,82 +393,107 @@ fn sort_windows(windows: &mut [WindowState]) {
     windows.sort_by(|left, right| left.window_id.cmp(&right.window_id));
 }
 
-fn snapshot_from_windows(
+fn snapshot_from_inventory(
     params: &BackendSessionParams,
     rev: u64,
-    windows: Vec<WindowState>,
+    inventory: &[WindowState],
 ) -> UiSnapshot {
-    let mut windows = prepare_windows(params, windows);
+    let mut windows = project_windows(params, inventory);
     sort_windows(&mut windows);
     UiSnapshot {
         session_id: params.session_id.clone(),
         rev,
-        mode: params.mode.clone(),
+        profile: params.profile.clone(),
         captured_at: Utc::now(),
         windows,
     }
 }
 
-fn prepare_windows(params: &BackendSessionParams, windows: Vec<WindowState>) -> Vec<WindowState> {
-    windows
-        .into_iter()
+fn project_windows(params: &BackendSessionParams, inventory: &[WindowState]) -> Vec<WindowState> {
+    if matches!(
+        params.profile.observation_scope,
+        ObservationScope::AttachedWindows
+    ) && params.profile.target_filter.is_none()
+    {
+        return Vec::new();
+    }
+
+    inventory
+        .iter()
+        .cloned()
         .filter_map(|mut window| {
-            if !matches_onec_mode(&window, &params.mode) {
+            if !matches_window_filter(&window, params.profile.target_filter.as_ref()) {
                 return None;
             }
-            annotate_onec_window(&mut window, &params.mode);
+            if !matches_domain_profile(&window, &params.profile.domain_profile) {
+                return None;
+            }
+            annotate_domain_window(&mut window, &params.profile.domain_profile);
             Some(window)
         })
         .collect()
 }
 
-fn matches_onec_mode(window: &WindowState, mode: &SessionMode) -> bool {
-    let onec_like = is_onec_process(window.process_name.as_deref())
-        || looks_like_onec_window(window)
-        || tree_has_v8_surface(&window.root);
-    if !onec_like {
-        return false;
-    }
+fn matches_window_filter(window: &WindowState, filter: Option<&WindowLocator>) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
 
-    match mode {
-        SessionMode::EnterpriseUi => !looks_like_configurator_window(window),
-        SessionMode::Configurator => looks_like_configurator_window(window),
-    }
+    filter
+        .window_id
+        .as_ref()
+        .map(|window_id| &window.window_id == window_id)
+        .unwrap_or(true)
+        && filter
+            .title
+            .as_ref()
+            .map(|title| normalize_for_key(&window.title) == normalize_for_key(title))
+            .unwrap_or(true)
+        && filter.pid.map(|pid| window.pid == pid).unwrap_or(true)
+        && filter
+            .process_name
+            .as_ref()
+            .map(|process_name| {
+                window
+                    .process_name
+                    .as_deref()
+                    .map(normalize_for_key)
+                    .as_deref()
+                    == Some(normalize_for_key(process_name).as_str())
+            })
+            .unwrap_or(true)
+        && filter
+            .class_name
+            .as_ref()
+            .map(|class_name| {
+                window
+                    .root
+                    .class_name
+                    .as_deref()
+                    .map(normalize_for_key)
+                    .as_deref()
+                    == Some(normalize_for_key(class_name).as_str())
+            })
+            .unwrap_or(true)
 }
 
-#[cfg_attr(not(any(test, windows)), allow(dead_code))]
-fn matches_onec_metadata_hint(
-    process_name: Option<&str>,
-    title: &str,
-    class_name: Option<&str>,
-    mode: &SessionMode,
-) -> bool {
-    let onec_like = is_onec_process(process_name)
-        || text_has_any(
-            title,
-            &[
-                "1c",
-                "1с",
-                "enterprise",
-                "предприятие",
-                "configurator",
-                "конфигуратор",
-            ],
-        )
-        || class_name.map(is_v8_class).unwrap_or(false);
+fn matches_domain_profile(window: &WindowState, profile: &DomainProfile) -> bool {
+    match profile {
+        DomainProfile::Generic => true,
+        DomainProfile::OnecEnterpriseUi | DomainProfile::OnecConfigurator => {
+            let onec_like = is_onec_process(window.process_name.as_deref())
+                || looks_like_onec_window(window)
+                || tree_has_v8_surface(&window.root);
+            if !onec_like {
+                return false;
+            }
 
-    if !onec_like {
-        return false;
-    }
-
-    let configurator_hint = matches!(
-        process_name.map(normalize_for_key).as_deref(),
-        Some("1cv8c.exe")
-    ) || text_has_any(title, &["configurator", "конфигуратор"]);
-
-    match mode {
-        SessionMode::EnterpriseUi => !configurator_hint,
-        SessionMode::Configurator => configurator_hint,
+            match profile {
+                DomainProfile::Generic => true,
+                DomainProfile::OnecEnterpriseUi => !looks_like_configurator_window(window),
+                DomainProfile::OnecConfigurator => looks_like_configurator_window(window),
+            }
+        }
     }
 }
 
@@ -520,7 +555,11 @@ fn looks_like_configurator_window(window: &WindowState) -> bool {
         )
 }
 
-fn annotate_onec_window(window: &mut WindowState, mode: &SessionMode) {
+fn annotate_domain_window(window: &mut WindowState, profile: &DomainProfile) {
+    if matches!(profile, DomainProfile::Generic) {
+        return;
+    }
+
     let window_profile = if looks_like_configurator_window(window) {
         "configurator_window"
     } else {
@@ -528,9 +567,10 @@ fn annotate_onec_window(window: &mut WindowState, mode: &SessionMode) {
     };
     window.root.properties.insert(
         "onec_mode".to_owned(),
-        PropertyValue::String(match mode {
-            SessionMode::EnterpriseUi => "enterprise_ui".to_owned(),
-            SessionMode::Configurator => "configurator".to_owned(),
+        PropertyValue::String(match profile {
+            DomainProfile::Generic => return,
+            DomainProfile::OnecEnterpriseUi => "enterprise_ui".to_owned(),
+            DomainProfile::OnecConfigurator => "configurator".to_owned(),
         }),
     );
     window.root.properties.insert(
@@ -545,15 +585,16 @@ fn annotate_onec_window(window: &mut WindowState, mode: &SessionMode) {
         );
     }
 
-    annotate_onec_node(&mut window.root, mode, window_profile);
+    annotate_onec_node(&mut window.root, profile, window_profile);
 }
 
-fn annotate_onec_node(node: &mut ElementNode, mode: &SessionMode, window_profile: &str) {
+fn annotate_onec_node(node: &mut ElementNode, profile: &DomainProfile, window_profile: &str) {
     node.properties.insert(
         "onec_mode".to_owned(),
-        PropertyValue::String(match mode {
-            SessionMode::EnterpriseUi => "enterprise_ui".to_owned(),
-            SessionMode::Configurator => "configurator".to_owned(),
+        PropertyValue::String(match profile {
+            DomainProfile::Generic => return,
+            DomainProfile::OnecEnterpriseUi => "enterprise_ui".to_owned(),
+            DomainProfile::OnecConfigurator => "configurator".to_owned(),
         }),
     );
     node.properties.insert(
@@ -576,7 +617,7 @@ fn annotate_onec_node(node: &mut ElementNode, mode: &SessionMode, window_profile
     }
 
     for child in node.children.iter_mut() {
-        annotate_onec_node(child, mode, window_profile);
+        annotate_onec_node(child, profile, window_profile);
     }
 }
 

@@ -22,7 +22,7 @@ use vmui_protocol::{
     ActionId, ActionRequest, ActionStatus, ActionTarget, ArtifactId, BackendKind, CapturePolicy,
     DiagnosticBundleOptions, DiagnosticStepVerdict, DiffOp, ElementId, ElementLocator, ElementNode,
     ElementStates, Locator, PropertyValue, Rect, RuntimeHealthState, RuntimeStatusRequest,
-    SessionId, SessionMode, TreeRequest, UiDiffBatch, UiSnapshot, WaitCondition, WaitForOptions,
+    SessionId, SessionProfile, TreeRequest, UiDiffBatch, UiSnapshot, WaitCondition, WaitForOptions,
     WindowId, WindowLocator, WindowState,
 };
 use vmui_transport_grpc::encode_action_request;
@@ -114,7 +114,7 @@ impl UiBackend for StubBackend {
         Ok(BackendSession {
             initial_snapshot: sample_snapshot(
                 params.session_id.clone(),
-                params.mode.clone(),
+                params.profile.clone(),
                 self.next_snapshot_rev(),
             ),
             events: Box::pin(stream::iter(self.events.clone())),
@@ -124,7 +124,7 @@ impl UiBackend for StubBackend {
     async fn capture_snapshot(&self, params: BackendSessionParams) -> anyhow::Result<UiSnapshot> {
         Ok(sample_snapshot(
             params.session_id,
-            params.mode,
+            params.profile,
             self.next_snapshot_rev(),
         ))
     }
@@ -174,7 +174,7 @@ impl UiBackend for WaitBackend {
         });
 
         Ok(BackendSession {
-            initial_snapshot: sample_snapshot(params.session_id, params.mode, 1),
+            initial_snapshot: sample_snapshot(params.session_id, params.profile, 1),
             events: Box::pin(ReceiverStream::new({
                 let (event_tx, event_rx) = tokio::sync::mpsc::channel(4);
                 tokio::spawn(async move {
@@ -189,7 +189,7 @@ impl UiBackend for WaitBackend {
     }
 
     async fn capture_snapshot(&self, params: BackendSessionParams) -> anyhow::Result<UiSnapshot> {
-        Ok(sample_snapshot(params.session_id, params.mode, 1))
+        Ok(sample_snapshot(params.session_id, params.profile, 1))
     }
 
     async fn perform_action(&self, action: ActionRequest) -> anyhow::Result<BackendActionResult> {
@@ -224,13 +224,13 @@ impl UiBackend for SlowActionBackend {
 
     async fn open_session(&self, params: BackendSessionParams) -> anyhow::Result<BackendSession> {
         Ok(BackendSession {
-            initial_snapshot: sample_snapshot(params.session_id, params.mode, 1),
+            initial_snapshot: sample_snapshot(params.session_id, params.profile, 1),
             events: Box::pin(stream::empty::<BackendEvent>()),
         })
     }
 
     async fn capture_snapshot(&self, params: BackendSessionParams) -> anyhow::Result<UiSnapshot> {
-        Ok(sample_snapshot(params.session_id, params.mode, 1))
+        Ok(sample_snapshot(params.session_id, params.profile, 1))
     }
 
     async fn perform_action(&self, action: ActionRequest) -> anyhow::Result<BackendActionResult> {
@@ -253,13 +253,7 @@ async fn session_returns_ack_then_initial_snapshot() {
         .expect("spawn server");
 
     let outbound = tokio_stream::iter(vec![
-        pb::ClientMsg {
-            payload: Some(client_msg::Payload::Hello(pb::Hello {
-                client_name: "test".to_owned(),
-                client_version: "0.1.0".to_owned(),
-                requested_mode: pb::SessionMode::Configurator as i32,
-            })),
-        },
+        test_hello(configurator_profile()),
         pb::ClientMsg {
             payload: Some(client_msg::Payload::Subscribe(pb::Subscribe {
                 include_initial_snapshot: true,
@@ -286,7 +280,10 @@ async fn session_returns_ack_then_initial_snapshot() {
     match first.payload.expect("payload") {
         server_msg::Payload::HelloAck(ack) => {
             assert_eq!(ack.backend_id, "stub-backend");
-            assert_eq!(ack.negotiated_mode, pb::SessionMode::Configurator as i32);
+            assert_eq!(
+                ack.negotiated_profile,
+                Some(pb::SessionProfile::from(configurator_profile()))
+            );
         }
         other => panic!("unexpected first payload: {other:?}"),
     }
@@ -294,7 +291,10 @@ async fn session_returns_ack_then_initial_snapshot() {
     match second.payload.expect("payload") {
         server_msg::Payload::InitialSnapshot(snapshot) => {
             assert_eq!(snapshot.rev, 1);
-            assert_eq!(snapshot.mode, pb::SessionMode::Configurator as i32);
+            assert_eq!(
+                snapshot.profile,
+                Some(pb::SessionProfile::from(configurator_profile()))
+            );
             assert_eq!(snapshot.windows.len(), 1);
         }
         other => panic!("unexpected second payload: {other:?}"),
@@ -355,13 +355,7 @@ async fn list_windows_returns_snapshot_artifact_over_grpc() {
     .expect("encode action");
 
     let outbound = tokio_stream::iter(vec![
-        pb::ClientMsg {
-            payload: Some(client_msg::Payload::Hello(pb::Hello {
-                client_name: "test".to_owned(),
-                client_version: "0.1.0".to_owned(),
-                requested_mode: pb::SessionMode::EnterpriseUi as i32,
-            })),
-        },
+        test_hello(enterprise_profile()),
         pb::ClientMsg {
             payload: Some(client_msg::Payload::Subscribe(pb::Subscribe {
                 include_initial_snapshot: false,
@@ -440,6 +434,8 @@ async fn failed_backend_action_with_on_failure_capture_attaches_snapshot_artifac
             window_id: Some(WindowId::from("wnd-1")),
             title: None,
             pid: None,
+            process_name: None,
+            class_name: None,
         }),
         kind: domain::ActionKind::FocusWindow,
         capture_policy: CapturePolicy::OnFailure,
@@ -447,13 +443,7 @@ async fn failed_backend_action_with_on_failure_capture_attaches_snapshot_artifac
     .expect("encode action");
 
     let outbound = tokio_stream::iter(vec![
-        pb::ClientMsg {
-            payload: Some(client_msg::Payload::Hello(pb::Hello {
-                client_name: "test".to_owned(),
-                client_version: "0.1.0".to_owned(),
-                requested_mode: pb::SessionMode::EnterpriseUi as i32,
-            })),
-        },
+        test_hello(enterprise_profile()),
         pb::ClientMsg {
             payload: Some(client_msg::Payload::Subscribe(pb::Subscribe {
                 include_initial_snapshot: false,
@@ -520,6 +510,8 @@ async fn wait_for_completes_from_diff_updates() {
             window_id: Some(WindowId::from("wnd-1")),
             title: None,
             pid: None,
+            process_name: None,
+            class_name: None,
         }),
         kind: domain::ActionKind::WaitFor(WaitForOptions {
             condition: WaitCondition::Gone,
@@ -530,13 +522,7 @@ async fn wait_for_completes_from_diff_updates() {
     .expect("encode action");
 
     let outbound = tokio_stream::iter(vec![
-        pb::ClientMsg {
-            payload: Some(client_msg::Payload::Hello(pb::Hello {
-                client_name: "test".to_owned(),
-                client_version: "0.1.0".to_owned(),
-                requested_mode: pb::SessionMode::EnterpriseUi as i32,
-            })),
-        },
+        test_hello(enterprise_profile()),
         pb::ClientMsg {
             payload: Some(client_msg::Payload::Subscribe(pb::Subscribe {
                 include_initial_snapshot: true,
@@ -592,6 +578,8 @@ async fn wait_for_completes_from_backend_events_without_diff_stream() {
             window_id: Some(WindowId::from("wnd-1")),
             title: None,
             pid: None,
+            process_name: None,
+            class_name: None,
         }),
         kind: domain::ActionKind::WaitFor(WaitForOptions {
             condition: WaitCondition::Gone,
@@ -602,13 +590,7 @@ async fn wait_for_completes_from_backend_events_without_diff_stream() {
     .expect("encode action");
 
     let outbound = tokio_stream::iter(vec![
-        pb::ClientMsg {
-            payload: Some(client_msg::Payload::Hello(pb::Hello {
-                client_name: "test".to_owned(),
-                client_version: "0.1.0".to_owned(),
-                requested_mode: pb::SessionMode::EnterpriseUi as i32,
-            })),
-        },
+        test_hello(enterprise_profile()),
         pb::ClientMsg {
             payload: Some(client_msg::Payload::Subscribe(pb::Subscribe {
                 include_initial_snapshot: true,
@@ -667,6 +649,8 @@ async fn backend_action_timeout_returns_timed_out_result() {
             window_id: Some(WindowId::from("wnd-1")),
             title: None,
             pid: None,
+            process_name: None,
+            class_name: None,
         }),
         kind: domain::ActionKind::FocusWindow,
         capture_policy: CapturePolicy::OnFailure,
@@ -674,13 +658,7 @@ async fn backend_action_timeout_returns_timed_out_result() {
     .expect("encode action");
 
     let outbound = tokio_stream::iter(vec![
-        pb::ClientMsg {
-            payload: Some(client_msg::Payload::Hello(pb::Hello {
-                client_name: "test".to_owned(),
-                client_version: "0.1.0".to_owned(),
-                requested_mode: pb::SessionMode::EnterpriseUi as i32,
-            })),
-        },
+        test_hello(enterprise_profile()),
         pb::ClientMsg {
             payload: Some(client_msg::Payload::Subscribe(pb::Subscribe {
                 include_initial_snapshot: false,
@@ -757,13 +735,7 @@ async fn get_tree_raw_flag_changes_artifact_shape() {
     .expect("encode action");
 
     let outbound = tokio_stream::iter(vec![
-        pb::ClientMsg {
-            payload: Some(client_msg::Payload::Hello(pb::Hello {
-                client_name: "test".to_owned(),
-                client_version: "0.1.0".to_owned(),
-                requested_mode: pb::SessionMode::EnterpriseUi as i32,
-            })),
-        },
+        test_hello(enterprise_profile()),
         pb::ClientMsg {
             payload: Some(client_msg::Payload::Subscribe(pb::Subscribe {
                 include_initial_snapshot: false,
@@ -865,11 +837,8 @@ async fn collect_diagnostic_bundle_persists_bundle_diff_and_baseline_comparison(
             .expect("spawn server");
 
     let baseline_artifact_id = {
-        let mut baseline = sample_snapshot(
-            SessionId::from("sess-baseline"),
-            SessionMode::EnterpriseUi,
-            1,
-        );
+        let mut baseline =
+            sample_snapshot(SessionId::from("sess-baseline"), enterprise_profile(), 1);
         baseline.windows[0].window_id = WindowId::from("wnd-baseline");
         baseline.windows[0].root.element_id = ElementId::from("elt-baseline");
         baseline.windows[0].root.locator.window_fingerprint = "1cv8.exe:1c:baseline".to_owned();
@@ -893,13 +862,7 @@ async fn collect_diagnostic_bundle_persists_bundle_diff_and_baseline_comparison(
 
     let (outbound_tx, outbound_rx) = mpsc::channel(4);
     outbound_tx
-        .send(pb::ClientMsg {
-            payload: Some(client_msg::Payload::Hello(pb::Hello {
-                client_name: "test".to_owned(),
-                client_version: "0.1.0".to_owned(),
-                requested_mode: pb::SessionMode::EnterpriseUi as i32,
-            })),
-        })
+        .send(test_hello(enterprise_profile()))
         .await
         .expect("send hello");
     outbound_tx
@@ -937,6 +900,8 @@ async fn collect_diagnostic_bundle_persists_bundle_diff_and_baseline_comparison(
             window_id: Some(WindowId::from("wnd-1")),
             title: None,
             pid: None,
+            process_name: None,
+            class_name: None,
         }),
         kind: domain::ActionKind::CollectDiagnosticBundle(DiagnosticBundleOptions {
             step_id: Some("step-7".to_owned()),
@@ -1032,11 +997,7 @@ async fn collect_diagnostic_bundle_persists_bundle_diff_and_baseline_comparison(
 
 #[test]
 fn compare_snapshots_matches_cross_session_windows_semantically() {
-    let mut expected = sample_snapshot(
-        SessionId::from("sess-expected"),
-        SessionMode::EnterpriseUi,
-        1,
-    );
+    let mut expected = sample_snapshot(SessionId::from("sess-expected"), enterprise_profile(), 1);
     expected.windows[0].window_id = WindowId::from("wnd-expected");
     expected.windows[0].root.element_id = ElementId::from("elt-expected");
     expected.windows[0].root.locator.window_fingerprint = "1cv8.exe:1c:expected".to_owned();
@@ -1048,7 +1009,7 @@ fn compare_snapshots_matches_cross_session_windows_semantically() {
         "Поиск",
     ));
 
-    let actual = sample_snapshot(SessionId::from("sess-actual"), SessionMode::EnterpriseUi, 1);
+    let actual = sample_snapshot(SessionId::from("sess-actual"), enterprise_profile(), 1);
 
     let comparison = compare_snapshots(&ArtifactId::from("artifact-baseline"), &expected, &actual);
 
@@ -1100,13 +1061,7 @@ async fn get_runtime_status_returns_structured_health_artifact() {
     }
 
     let outbound = tokio_stream::iter(vec![
-        pb::ClientMsg {
-            payload: Some(client_msg::Payload::Hello(pb::Hello {
-                client_name: "test".to_owned(),
-                client_version: "0.1.0".to_owned(),
-                requested_mode: pb::SessionMode::EnterpriseUi as i32,
-            })),
-        },
+        test_hello(enterprise_profile()),
         pb::ClientMsg {
             payload: Some(client_msg::Payload::Subscribe(pb::Subscribe {
                 include_initial_snapshot: false,
@@ -1183,13 +1138,7 @@ async fn stale_diff_triggers_resync_event_and_snapshot_refresh() {
 
     let (outbound_tx, outbound_rx) = mpsc::channel(4);
     outbound_tx
-        .send(pb::ClientMsg {
-            payload: Some(client_msg::Payload::Hello(pb::Hello {
-                client_name: "test".to_owned(),
-                client_version: "0.1.0".to_owned(),
-                requested_mode: pb::SessionMode::EnterpriseUi as i32,
-            })),
-        })
+        .send(test_hello(enterprise_profile()))
         .await
         .expect("send hello");
     outbound_tx
@@ -1313,7 +1262,7 @@ where
         AgentConfig {
             bind_addr: addr.to_string(),
             artifact_dir,
-            default_mode: SessionMode::EnterpriseUi,
+            default_profile: enterprise_profile(),
             artifact_retention: ArtifactRetentionPolicy::default(),
         },
         backend,
@@ -1355,11 +1304,29 @@ async fn read_artifact_json(
     serde_json::from_slice(&bytes).expect("json artifact")
 }
 
-fn sample_snapshot(session_id: domain::SessionId, mode: SessionMode, rev: u64) -> UiSnapshot {
+fn enterprise_profile() -> SessionProfile {
+    SessionProfile::onec_enterprise_ui()
+}
+
+fn configurator_profile() -> SessionProfile {
+    SessionProfile::onec_configurator()
+}
+
+fn test_hello(profile: SessionProfile) -> pb::ClientMsg {
+    pb::ClientMsg {
+        payload: Some(client_msg::Payload::Hello(pb::Hello {
+            client_name: "test".to_owned(),
+            client_version: "0.1.0".to_owned(),
+            requested_profile: Some(pb::SessionProfile::from(profile)),
+        })),
+    }
+}
+
+fn sample_snapshot(session_id: domain::SessionId, profile: SessionProfile, rev: u64) -> UiSnapshot {
     UiSnapshot {
         session_id,
         rev,
-        mode,
+        profile,
         captured_at: Utc
             .timestamp_millis_opt(1_700_000_000_123)
             .single()

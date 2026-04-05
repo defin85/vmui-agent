@@ -24,7 +24,7 @@ This repository is intentionally scaffolded for agent-driven development:
 - WinEvent and MSAA are wired as refresh hints/fallback sources with explicit provenance in state;
 - window and element identity now uses session-stable rebinding plus semantic locators instead of raw ordinal-only paths;
 - semantic action execution is implemented in the daemon and Windows backend;
-- explicit 1C `enterprise_ui` and `configurator` modes now filter tracked windows and annotate 1C-specific profiles/fallback expectations;
+- generic Windows desktop observation is now the canonical read path, with explicit session profiles for generic desktop, attach-filtered sessions, 1C Enterprise UI, and 1C Configurator;
 - post-failure 1C diagnostic bundles now capture current state, recent diffs, baseline comparison, and targeted artifacts while preserving the original external test verdict;
 - daemon runtime status now exposes structured health, resync, warning, fallback, action-outcome, and artifact-retention summaries;
 - artifact retention is now explicit, with startup orphan sweep plus periodic cleanup;
@@ -61,6 +61,7 @@ This repository is intentionally scaffolded for agent-driven development:
 - The Windows automation process must run in the interactive VM session, not in Session 0.
 - UIA is the primary backend, WinEvent/MSAA is secondary, OCR is fallback-only.
 - The external agent should consume `initial_snapshot + diff stream + wait_for`, not full-screen polling.
+- Session startup must negotiate a structured observation profile, not a legacy mode enum.
 
 ## OpenSpec And Beads
 

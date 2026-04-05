@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use vmui_protocol::{
     ActionId, ActionRequest, ActionResult, ActionStatus, ArtifactDescriptor, SessionId,
-    SessionMode, UiDiffBatch, UiSnapshot,
+    SessionProfile, UiDiffBatch, UiSnapshot,
 };
 
 pub type BackendEventStream = Pin<Box<dyn Stream<Item = BackendEvent> + Send>>;
@@ -55,7 +55,7 @@ pub struct BackendCapabilities {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackendSessionParams {
     pub session_id: SessionId,
-    pub mode: SessionMode,
+    pub profile: SessionProfile,
     pub shallow: bool,
 }
 

@@ -63,10 +63,12 @@
 - Use `docs/windows-vm-bootstrap.md` for concrete Windows-side bootstrap commands.
 - Treat SSH administration and desktop-capable execution as different planes.
 - Prefer an SSH local forward to the VM loopback daemon endpoint and run `vmui-mcp-proxy` locally on the Linux host.
+- For the canonical generic desktop smoke on the VM, use:
+  `./scripts/vm/notepad-smoke.sh`
 
 ## Changing Runtime Defaults
 
-- Bind address, artifact dir, and default mode live in `crates/vmui-core/src/lib.rs`.
+- Bind address, artifact dir, and default profile live in `crates/vmui-core/src/lib.rs`.
 - If you change those defaults, update:
   `README.md`
   `docs/dev-runbook.md`

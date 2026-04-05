@@ -5,7 +5,7 @@
 - Start from `src/lib.rs`; runtime defaults live in `AgentConfig::default()`.
 
 ## Edit Routing
-- Bind address, artifact dir, and default mode:
+- Bind address, artifact dir, and default profile:
   `src/lib.rs`
 - Session registry and runtime metadata:
   `src/lib.rs`

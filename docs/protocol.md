@@ -37,9 +37,12 @@
 - `diff_batch` moves the client from `base_rev` to `new_rev`.
 - If the client misses revisions, the server emits `snapshot_resync` and follows it with a refreshed `initial_snapshot`.
 - Runtime degradation and recovery stay explicit through `warning` messages such as `session_resync_required`, `session_state_recovered`, `session_resync_apply_failed`, `session_resync_refresh_failed`, and `artifact_retention_cleanup`.
-- Session mode scopes 1C observation to the intended surface family instead of broad desktop-wide automation.
+- `hello.requested_profile`, `hello_ack.negotiated_profile`, and `initial_snapshot.profile` carry the negotiated observation contract for the whole session.
+- `observation_scope=desktop` means a full visible-desktop inventory for that session; `observation_scope=attached_windows` means the session is scoped to an explicit target filter.
+- `target_filter` is the attach/narrowing locator and can match by `window_id`, `pid`, `process_name`, `title`, or `class_name`.
+- `domain_profile=generic` keeps the read path desktop-generic; `domain_profile=onec_enterprise_ui` and `domain_profile=onec_configurator` project the generic inventory through 1C-specific narrowing and enrichment.
 - Windows and elements carry backend provenance plus confidence so fallback-triggered refreshes stay explicit.
-- 1C-oriented snapshots can annotate windows and nodes with profile metadata such as `onec_window_profile`, `onec_profile`, and `onec_fallback_reason`.
+- 1C-oriented session views can annotate windows and nodes with profile metadata such as `onec_window_profile`, `onec_profile`, and `onec_fallback_reason`.
 - WinEvent and MSAA are treated as refresh hints; the emitted snapshot/diff remains the source of truth.
 - Window and element ids are expected to stay stable across targeted refresh when the same semantic control is matched again.
 - Locator segments should contain semantic fields first, with sibling ordinal used only as a duplicate tie-breaker.

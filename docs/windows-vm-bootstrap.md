@@ -83,18 +83,18 @@ This task is intentionally interactive-only so the daemon stays in the logged-on
 $pwsh = (Get-Command pwsh -ErrorAction Stop).Source
 $action = New-ScheduledTaskAction -Execute $pwsh -Argument "-NoLogo -NoProfile -ExecutionPolicy Bypass -File C:\vmui-agent\scripts\vm\windows\start-vmui-agent.ps1"
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "<AUTOMATION_USER>"
-$principal = New-ScheduledTaskPrincipal -UserId "<AUTOMATION_USER>" -LogonType InteractiveToken -RunLevel Highest
+$principal = New-ScheduledTaskPrincipal -UserId "<AUTOMATION_USER>" -LogonType Interactive -RunLevel Highest
 Register-ScheduledTask -Force -TaskName "vmui-agent-session" -Action $action -Trigger $trigger -Principal $principal
 ```
 
 ## 7. Create The Interactive Smoke Task
 
-This is a placeholder smoke task until a repo-tracked Windows smoke script is added.
+This task is now optional. The canonical repo-tracked end-to-end smoke lives on the Linux host in `scripts/vm/notepad-smoke.sh`, which creates short-lived interactive tasks on demand for `Notepad` launch and clipboard verification. Keep `vmui-smoke` only if you also want a reusable ad-hoc interactive hook on the VM itself.
 
 ```powershell
 $pwsh = (Get-Command pwsh -ErrorAction Stop).Source
 $action = New-ScheduledTaskAction -Execute $pwsh -Argument "-NoLogo -NoProfile -ExecutionPolicy Bypass -File C:\vmui-agent\scripts\vm\windows\run-vmui-smoke.ps1"
-$principal = New-ScheduledTaskPrincipal -UserId "<AUTOMATION_USER>" -LogonType InteractiveToken -RunLevel Highest
+$principal = New-ScheduledTaskPrincipal -UserId "<AUTOMATION_USER>" -LogonType Interactive -RunLevel Highest
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddYears(10)
 Register-ScheduledTask -Force -TaskName "vmui-smoke" -Action $action -Trigger $trigger -Principal $principal
 ```
@@ -109,8 +109,7 @@ cp scripts/vm/vm.env.example .vmui-vm.env
 ./scripts/vm/sync.sh --worktree
 ./scripts/vm/build.sh check --workspace
 ./scripts/vm/restart-agent.sh
-./scripts/vm/tunnel.sh --background
-VMUI_DAEMON_ADDR=http://127.0.0.1:50051 cargo run -p vmui-mcp-proxy
+./scripts/vm/notepad-smoke.sh
 ```
 
 ## References
@@ -122,3 +121,4 @@ VMUI_DAEMON_ADDR=http://127.0.0.1:50051 cargo run -p vmui-mcp-proxy
 - `scripts/vm/build.sh`
 - `scripts/vm/restart-agent.sh`
 - `scripts/vm/tunnel.sh`
+- `scripts/vm/notepad-smoke.sh`

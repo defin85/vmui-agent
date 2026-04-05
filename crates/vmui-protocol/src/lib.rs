@@ -54,14 +54,80 @@ id_type!(WindowId);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionMode {
-    EnterpriseUi,
-    Configurator,
+pub enum ObservationScope {
+    Desktop,
+    AttachedWindows,
 }
 
-impl Default for SessionMode {
+impl Default for ObservationScope {
     fn default() -> Self {
-        Self::EnterpriseUi
+        Self::Desktop
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DomainProfile {
+    Generic,
+    OnecEnterpriseUi,
+    OnecConfigurator,
+}
+
+impl Default for DomainProfile {
+    fn default() -> Self {
+        Self::Generic
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionProfile {
+    pub observation_scope: ObservationScope,
+    pub domain_profile: DomainProfile,
+    pub target_filter: Option<WindowLocator>,
+}
+
+impl SessionProfile {
+    pub fn generic_desktop() -> Self {
+        Self {
+            observation_scope: ObservationScope::Desktop,
+            domain_profile: DomainProfile::Generic,
+            target_filter: None,
+        }
+    }
+
+    pub fn onec_enterprise_ui() -> Self {
+        Self {
+            observation_scope: ObservationScope::Desktop,
+            domain_profile: DomainProfile::OnecEnterpriseUi,
+            target_filter: None,
+        }
+    }
+
+    pub fn onec_configurator() -> Self {
+        Self {
+            observation_scope: ObservationScope::Desktop,
+            domain_profile: DomainProfile::OnecConfigurator,
+            target_filter: None,
+        }
+    }
+
+    pub fn attached_windows(domain_profile: DomainProfile, target_filter: WindowLocator) -> Self {
+        Self {
+            observation_scope: ObservationScope::AttachedWindows,
+            domain_profile,
+            target_filter: (!target_filter.is_empty()).then_some(target_filter),
+        }
+    }
+
+    pub fn normalized(mut self) -> Self {
+        if self
+            .target_filter
+            .as_ref()
+            .is_some_and(WindowLocator::is_empty)
+        {
+            self.target_filter = None;
+        }
+        self
     }
 }
 
@@ -106,7 +172,7 @@ pub enum ServerMessage {
 pub struct Hello {
     pub client_name: String,
     pub client_version: String,
-    pub requested_mode: SessionMode,
+    pub requested_profile: SessionProfile,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,7 +181,7 @@ pub struct HelloAck {
     pub server_version: String,
     pub backend_id: String,
     pub capabilities: Vec<String>,
-    pub negotiated_mode: SessionMode,
+    pub negotiated_profile: SessionProfile,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -146,7 +212,7 @@ pub struct WarningEvent {
 pub struct UiSnapshot {
     pub session_id: SessionId,
     pub rev: Revision,
-    pub mode: SessionMode,
+    pub profile: SessionProfile,
     pub captured_at: DateTime<Utc>,
     pub windows: Vec<WindowState>,
 }
@@ -286,11 +352,23 @@ pub enum ActionTarget {
     Region(RegionTarget),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WindowLocator {
     pub window_id: Option<WindowId>,
     pub title: Option<String>,
     pub pid: Option<u32>,
+    pub process_name: Option<String>,
+    pub class_name: Option<String>,
+}
+
+impl WindowLocator {
+    pub fn is_empty(&self) -> bool {
+        self.window_id.is_none()
+            && self.title.is_none()
+            && self.pid.is_none()
+            && self.process_name.is_none()
+            && self.class_name.is_none()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

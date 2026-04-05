@@ -166,7 +166,7 @@ where
             .backend
             .capture_snapshot(BackendSessionParams {
                 session_id: context.session_id.clone(),
-                mode: context.mode.clone(),
+                profile: context.profile.clone(),
                 shallow: false,
             })
             .await
@@ -322,7 +322,7 @@ where
         let bundle_payload = json!({
             "diagnostic_context": {
                 "session_id": context.session_id.clone(),
-                "mode": context.mode.clone(),
+                "profile": context.profile.clone(),
                 "step_id": options.step_id.clone(),
                 "step_label": options.step_label.clone(),
                 "test_verdict": options.test_verdict.clone(),
@@ -733,9 +733,10 @@ where
                     }
 
                     let session_id = domain::SessionId::new("sess");
+                    let requested_profile = validate_requested_profile(hello.requested_profile)?;
                     let runtime = SessionRuntime::new(
                         session_id.clone(),
-                        hello.requested_mode.clone(),
+                        requested_profile.clone(),
                         self.backend.backend_id(),
                     );
 
@@ -749,14 +750,14 @@ where
                         server_version: self.server_version.clone(),
                         backend_id: self.backend.backend_id().to_owned(),
                         capabilities: backend_capabilities(&*self.backend),
-                        negotiated_mode: hello.requested_mode.clone(),
+                        negotiated_profile: requested_profile.clone(),
                     };
                     send_server_message(&tx, domain::ServerMessage::HelloAck(ack)).await?;
                     let (revision_tx, _) = watch::channel(0);
 
                     context = Some(SessionContext {
                         session_id,
-                        mode: hello.requested_mode,
+                        profile: requested_profile,
                         subscribed: false,
                         event_task: None,
                         revision_tx,
@@ -775,7 +776,7 @@ where
 
                     let params = BackendSessionParams {
                         session_id: context.session_id.clone(),
-                        mode: context.mode.clone(),
+                        profile: context.profile.clone(),
                         shallow: subscribe.shallow,
                     };
 
@@ -1215,7 +1216,7 @@ fn compare_snapshots(
             })
         })
         .collect::<Vec<_>>();
-    let matches = expected.mode == actual.mode
+    let matches = expected.profile == actual.profile
         && added_windows.is_empty()
         && removed_windows.is_empty()
         && changed_windows.is_empty();
@@ -1224,8 +1225,8 @@ fn compare_snapshots(
         "status": "compared",
         "baseline_artifact_id": baseline_artifact_id,
         "matches": matches,
-        "expected_mode": expected.mode,
-        "actual_mode": actual.mode,
+        "expected_profile": expected.profile,
+        "actual_profile": actual.profile,
         "expected_window_count": expected.windows.len(),
         "actual_window_count": actual.windows.len(),
         "matched_windows": matched_windows_json,
@@ -1868,10 +1869,23 @@ fn resolve_window<'a>(
             .map(|title| &window.title == title)
             .unwrap_or(true)
             && locator.pid.map(|pid| window.pid == pid).unwrap_or(true)
+            && locator
+                .process_name
+                .as_ref()
+                .map(|process_name| window.process_name.as_ref() == Some(process_name))
+                .unwrap_or(true)
+            && locator
+                .class_name
+                .as_ref()
+                .map(|class_name| window.root.class_name.as_ref() == Some(class_name))
+                .unwrap_or(true)
     });
 
     match (
-        locator.title.is_some() || locator.pid.is_some(),
+        locator.title.is_some()
+            || locator.pid.is_some()
+            || locator.process_name.is_some()
+            || locator.class_name.is_some(),
         snapshot.windows.len(),
     ) {
         (true, _) => candidates.next(),
@@ -2228,6 +2242,23 @@ fn invalid_argument_status(error: ConvertError) -> Status {
     Status::invalid_argument(error.to_string())
 }
 
+fn validate_requested_profile(
+    profile: domain::SessionProfile,
+) -> Result<domain::SessionProfile, Status> {
+    let profile = profile.normalized();
+    if matches!(
+        profile.observation_scope,
+        domain::ObservationScope::AttachedWindows
+    ) && profile.target_filter.is_none()
+    {
+        return Err(Status::invalid_argument(
+            "attached_windows observation_scope requires a non-empty target_filter",
+        ));
+    }
+
+    Ok(profile)
+}
+
 fn internal_status(error: impl std::fmt::Display) -> Status {
     Status::internal(error.to_string())
 }
@@ -2240,7 +2271,7 @@ async fn shutdown_signal() {
 
 struct SessionContext {
     session_id: domain::SessionId,
-    mode: domain::SessionMode,
+    profile: domain::SessionProfile,
     subscribed: bool,
     event_task: Option<tokio::task::JoinHandle<()>>,
     revision_tx: watch::Sender<domain::Revision>,

@@ -78,14 +78,14 @@ impl VmuiMcpProxy {
 
     async fn open_session_internal(
         &self,
-        mode: domain::SessionMode,
+        profile: domain::SessionProfile,
     ) -> Result<SessionOpenResult, rmcp::ErrorData> {
         let logical_session_id = domain::SessionId::new("mcp").to_string();
         let worker = Arc::new(
             DaemonSessionWorker::open(
                 logical_session_id.clone(),
                 self.config.normalized_daemon_addr(),
-                mode.clone(),
+                profile.clone(),
             )
             .await?,
         );
@@ -98,7 +98,7 @@ impl VmuiMcpProxy {
 
         Ok(SessionOpenResult {
             session_id: logical_session_id,
-            mode,
+            profile: status.profile.clone(),
             daemon_session_id: status.daemon_session_id,
             backend_id: status.backend_id,
             capabilities: status.capabilities,
@@ -178,7 +178,7 @@ impl VmuiMcpProxy {
         &self,
         Parameters(params): Parameters<SessionOpenParams>,
     ) -> Result<Content, rmcp::ErrorData> {
-        Content::json(self.open_session_internal(params.mode.into()).await?)
+        Content::json(self.open_session_internal(params.profile.into()).await?)
     }
 
     #[tool(
@@ -551,7 +551,7 @@ impl VmuiMcpProxy {
 struct DaemonSessionWorker {
     logical_session_id: String,
     daemon_addr: String,
-    mode: domain::SessionMode,
+    profile: domain::SessionProfile,
     state: Arc<RwLock<WorkerState>>,
     action_lock: Arc<Mutex<()>>,
 }
@@ -598,12 +598,12 @@ impl DaemonSessionWorker {
     async fn open(
         logical_session_id: String,
         daemon_addr: String,
-        mode: domain::SessionMode,
+        profile: domain::SessionProfile,
     ) -> Result<Self, rmcp::ErrorData> {
         let worker = Self {
             logical_session_id,
             daemon_addr,
-            mode,
+            profile,
             state: Arc::new(RwLock::new(WorkerState::default())),
             action_lock: Arc::new(Mutex::new(())),
         };
@@ -627,7 +627,7 @@ impl DaemonSessionWorker {
         let snapshot = state.snapshot.snapshot().cloned();
         WorkerStatus {
             session_id: self.logical_session_id.clone(),
-            mode: self.mode.clone().into(),
+            profile: self.profile.clone().into(),
             daemon_session_id: state.daemon_session_id.clone(),
             backend_id: state.backend_id.clone(),
             capabilities: state.capabilities.clone(),
@@ -823,7 +823,7 @@ impl DaemonSessionWorker {
                 payload: Some(pb::client_msg::Payload::Hello(pb::Hello {
                     client_name: "vmui-mcp-proxy".to_owned(),
                     client_version: env!("CARGO_PKG_VERSION").to_owned(),
-                    requested_mode: pb::SessionMode::from(self.mode.clone()) as i32,
+                    requested_profile: Some(pb::SessionProfile::from(self.profile.clone())),
                 })),
             },
         )
@@ -1084,25 +1084,116 @@ pub async fn run_stdio_server() -> Result<()> {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum ProxySessionMode {
-    EnterpriseUi,
-    Configurator,
+pub enum ProxyObservationScope {
+    Desktop,
+    AttachedWindows,
 }
 
-impl From<ProxySessionMode> for domain::SessionMode {
-    fn from(value: ProxySessionMode) -> Self {
+impl From<ProxyObservationScope> for domain::ObservationScope {
+    fn from(value: ProxyObservationScope) -> Self {
         match value {
-            ProxySessionMode::EnterpriseUi => Self::EnterpriseUi,
-            ProxySessionMode::Configurator => Self::Configurator,
+            ProxyObservationScope::Desktop => Self::Desktop,
+            ProxyObservationScope::AttachedWindows => Self::AttachedWindows,
         }
     }
 }
 
-impl From<domain::SessionMode> for ProxySessionMode {
-    fn from(value: domain::SessionMode) -> Self {
+impl From<domain::ObservationScope> for ProxyObservationScope {
+    fn from(value: domain::ObservationScope) -> Self {
         match value {
-            domain::SessionMode::EnterpriseUi => Self::EnterpriseUi,
-            domain::SessionMode::Configurator => Self::Configurator,
+            domain::ObservationScope::Desktop => Self::Desktop,
+            domain::ObservationScope::AttachedWindows => Self::AttachedWindows,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyDomainProfile {
+    Generic,
+    OnecEnterpriseUi,
+    OnecConfigurator,
+}
+
+impl From<ProxyDomainProfile> for domain::DomainProfile {
+    fn from(value: ProxyDomainProfile) -> Self {
+        match value {
+            ProxyDomainProfile::Generic => Self::Generic,
+            ProxyDomainProfile::OnecEnterpriseUi => Self::OnecEnterpriseUi,
+            ProxyDomainProfile::OnecConfigurator => Self::OnecConfigurator,
+        }
+    }
+}
+
+impl From<domain::DomainProfile> for ProxyDomainProfile {
+    fn from(value: domain::DomainProfile) -> Self {
+        match value {
+            domain::DomainProfile::Generic => Self::Generic,
+            domain::DomainProfile::OnecEnterpriseUi => Self::OnecEnterpriseUi,
+            domain::DomainProfile::OnecConfigurator => Self::OnecConfigurator,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyWindowFilter {
+    pub window_id: Option<String>,
+    pub title: Option<String>,
+    pub pid: Option<u32>,
+    pub process_name: Option<String>,
+    pub class_name: Option<String>,
+}
+
+impl From<ProxyWindowFilter> for domain::WindowLocator {
+    fn from(value: ProxyWindowFilter) -> Self {
+        Self {
+            window_id: value.window_id.map(domain::WindowId::from),
+            title: value.title,
+            pid: value.pid,
+            process_name: value.process_name,
+            class_name: value.class_name,
+        }
+    }
+}
+
+impl From<domain::WindowLocator> for ProxyWindowFilter {
+    fn from(value: domain::WindowLocator) -> Self {
+        Self {
+            window_id: value.window_id.map(|id| id.to_string()),
+            title: value.title,
+            pid: value.pid,
+            process_name: value.process_name,
+            class_name: value.class_name,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxySessionProfile {
+    pub observation_scope: ProxyObservationScope,
+    pub domain_profile: ProxyDomainProfile,
+    pub target_filter: Option<ProxyWindowFilter>,
+}
+
+impl From<ProxySessionProfile> for domain::SessionProfile {
+    fn from(value: ProxySessionProfile) -> Self {
+        domain::SessionProfile {
+            observation_scope: value.observation_scope.into(),
+            domain_profile: value.domain_profile.into(),
+            target_filter: value.target_filter.map(Into::into),
+        }
+        .normalized()
+    }
+}
+
+impl From<domain::SessionProfile> for ProxySessionProfile {
+    fn from(value: domain::SessionProfile) -> Self {
+        Self {
+            observation_scope: value.observation_scope.into(),
+            domain_profile: value.domain_profile.into(),
+            target_filter: value.target_filter.map(Into::into),
         }
     }
 }
@@ -1188,7 +1279,7 @@ impl From<DiagnosticVerdictParam> for domain::DiagnosticStepVerdict {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionOpenParams {
-    pub mode: ProxySessionMode,
+    pub profile: ProxySessionProfile,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -1369,6 +1460,8 @@ pub enum TargetParams {
         window_id: Option<String>,
         title: Option<String>,
         pid: Option<u32>,
+        process_name: Option<String>,
+        class_name: Option<String>,
     },
     Element {
         element_id: Option<String>,
@@ -1390,10 +1483,14 @@ impl TryFrom<TargetParams> for domain::ActionTarget {
                 window_id,
                 title,
                 pid,
+                process_name,
+                class_name,
             } => Self::Window(domain::WindowLocator {
                 window_id: window_id.map(domain::WindowId::from),
                 title,
                 pid,
+                process_name,
+                class_name,
             }),
             TargetParams::Element {
                 element_id,
@@ -1413,7 +1510,7 @@ impl TryFrom<TargetParams> for domain::ActionTarget {
 #[derive(Clone, Debug, Serialize)]
 pub struct SessionOpenResult {
     pub session_id: String,
-    pub mode: domain::SessionMode,
+    pub profile: ProxySessionProfile,
     pub daemon_session_id: Option<String>,
     pub backend_id: String,
     pub capabilities: Vec<String>,
@@ -1433,7 +1530,7 @@ pub struct SessionCloseResult {
 #[derive(Clone, Debug, Serialize)]
 pub struct WorkerStatus {
     pub session_id: String,
-    pub mode: ProxySessionMode,
+    pub profile: ProxySessionProfile,
     pub daemon_session_id: Option<String>,
     pub backend_id: String,
     pub capabilities: Vec<String>,
@@ -1538,7 +1635,7 @@ mod tests {
     };
     use vmui_protocol::{
         ActionStatus, BackendKind, ElementId, ElementNode, ElementStates, Locator, PropertyValue,
-        Rect, SessionId, SessionMode, UiSnapshot, WindowId, WindowState,
+        Rect, SessionId, SessionProfile, UiSnapshot, WindowId, WindowState,
     };
 
     #[derive(Clone, Default)]
@@ -1565,7 +1662,7 @@ mod tests {
             params: BackendSessionParams,
         ) -> anyhow::Result<BackendSession> {
             Ok(BackendSession {
-                initial_snapshot: sample_snapshot(params.session_id, params.mode, 1),
+                initial_snapshot: sample_snapshot(params.session_id, params.profile, 1),
                 events: Box::pin(tokio_stream::empty::<BackendEvent>()),
             })
         }
@@ -1574,7 +1671,7 @@ mod tests {
             &self,
             params: BackendSessionParams,
         ) -> anyhow::Result<UiSnapshot> {
-            Ok(sample_snapshot(params.session_id, params.mode, 1))
+            Ok(sample_snapshot(params.session_id, params.profile, 1))
         }
 
         async fn perform_action(
@@ -1609,7 +1706,7 @@ mod tests {
             AgentConfig {
                 bind_addr: addr.to_string(),
                 artifact_dir,
-                default_mode: SessionMode::EnterpriseUi,
+                default_profile: enterprise_profile(),
                 artifact_retention: ArtifactRetentionPolicy {
                     max_age_seconds: 24 * 60 * 60,
                     max_bytes: 128 * 1024 * 1024,
@@ -1644,7 +1741,7 @@ mod tests {
         let worker = DaemonSessionWorker::open(
             "mcp-sess-1".to_owned(),
             format!("http://{}", daemon.addr),
-            SessionMode::EnterpriseUi,
+            enterprise_profile(),
         )
         .await
         .expect("open worker");
@@ -1689,7 +1786,7 @@ mod tests {
         let worker = DaemonSessionWorker::open(
             "mcp-sess-2".to_owned(),
             format!("http://{}", daemon.addr),
-            SessionMode::EnterpriseUi,
+            enterprise_profile(),
         )
         .await
         .expect("open worker");
@@ -1710,6 +1807,8 @@ mod tests {
                         window_id: Some(domain::WindowId::from("wnd-1")),
                         title: None,
                         pid: None,
+                        process_name: None,
+                        class_name: None,
                     }),
                     kind: domain::ActionKind::FocusWindow,
                     capture_policy: domain::CapturePolicy::OnFailure,
@@ -1729,11 +1828,15 @@ mod tests {
         let _ = daemon.shutdown.send(());
     }
 
-    fn sample_snapshot(session_id: SessionId, mode: SessionMode, rev: u64) -> UiSnapshot {
+    fn enterprise_profile() -> SessionProfile {
+        SessionProfile::onec_enterprise_ui()
+    }
+
+    fn sample_snapshot(session_id: SessionId, profile: SessionProfile, rev: u64) -> UiSnapshot {
         UiSnapshot {
             session_id,
             rev,
-            mode,
+            profile,
             captured_at: Utc
                 .timestamp_millis_opt(1_700_000_000_123)
                 .single()

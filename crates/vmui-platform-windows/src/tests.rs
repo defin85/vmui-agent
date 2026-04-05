@@ -6,7 +6,10 @@ use std::{
 use tokio::time::{timeout, Duration};
 use tokio_stream::StreamExt;
 use vmui_platform::{BackendCapabilities, BackendEvent, BackendSessionParams};
-use vmui_protocol::{BackendKind, ElementStates, Locator, LocatorSegment, Rect, SessionMode};
+use vmui_protocol::{
+    BackendKind, DomainProfile, ElementStates, Locator, LocatorSegment, Rect, SessionProfile,
+    WindowLocator,
+};
 
 use super::*;
 
@@ -139,25 +142,98 @@ async fn enterprise_mode_filters_out_configurator_windows() {
 }
 
 #[test]
-fn metadata_hint_prefilters_non_matching_modes() {
-    assert!(matches_onec_metadata_hint(
-        Some("1cv8.exe"),
-        "1C:Enterprise",
-        Some("V8TopLevelFrame"),
-        &SessionMode::EnterpriseUi,
+fn domain_profile_matching_distinguishes_generic_enterprise_and_configurator() {
+    let enterprise = sample_window(0x10, "Enterprise", BackendKind::Uia, 1.0, false, false);
+    let configurator = sample_window(0x20, "Configurator", BackendKind::Uia, 1.0, false, false);
+    let notepad = sample_generic_window(0x30, "Untitled - Notepad", "notepad.exe", "Notepad");
+
+    assert!(matches_domain_profile(&enterprise, &DomainProfile::Generic));
+    assert!(matches_domain_profile(&notepad, &DomainProfile::Generic));
+    assert!(matches_domain_profile(
+        &enterprise,
+        &DomainProfile::OnecEnterpriseUi
     ));
-    assert!(!matches_onec_metadata_hint(
-        Some("1cv8c.exe"),
-        "Конфигуратор",
-        Some("V8TopLevelFrame"),
-        &SessionMode::EnterpriseUi,
+    assert!(!matches_domain_profile(
+        &configurator,
+        &DomainProfile::OnecEnterpriseUi
     ));
-    assert!(matches_onec_metadata_hint(
-        Some("1cv8c.exe"),
-        "Конфигуратор",
-        Some("V8TopLevelFrame"),
-        &SessionMode::Configurator,
+    assert!(matches_domain_profile(
+        &configurator,
+        &DomainProfile::OnecConfigurator
     ));
+    assert!(!matches_domain_profile(
+        &notepad,
+        &DomainProfile::OnecConfigurator
+    ));
+}
+
+#[tokio::test]
+async fn generic_desktop_profile_keeps_non_onec_windows() {
+    let initial_windows = vec![
+        sample_generic_window(0x10, "Untitled - Notepad", "notepad.exe", "Notepad"),
+        sample_window(0x20, "Enterprise", BackendKind::Uia, 1.0, false, false),
+    ];
+    let source = Arc::new(FakeObservationSource::new(
+        initial_windows,
+        Vec::new(),
+        None,
+    ));
+    let backend = WindowsBackend::from_source(source);
+    let params = BackendSessionParams {
+        session_id: vmui_protocol::SessionId::from("sess-generic"),
+        profile: SessionProfile::generic_desktop(),
+        shallow: false,
+    };
+
+    let session = backend.open_session(params).await.expect("open session");
+
+    assert_eq!(session.initial_snapshot.windows.len(), 2);
+    assert!(session
+        .initial_snapshot
+        .windows
+        .iter()
+        .any(|window| window.title == "Untitled - Notepad"));
+}
+
+#[tokio::test]
+async fn attached_windows_profile_filters_by_process_and_class() {
+    let initial_windows = vec![
+        sample_generic_window(0x10, "Untitled - Notepad", "notepad.exe", "Notepad"),
+        sample_generic_window(
+            0x20,
+            "Calculator",
+            "calculator.exe",
+            "ApplicationFrameWindow",
+        ),
+    ];
+    let source = Arc::new(FakeObservationSource::new(
+        initial_windows,
+        Vec::new(),
+        None,
+    ));
+    let backend = WindowsBackend::from_source(source);
+    let params = BackendSessionParams {
+        session_id: vmui_protocol::SessionId::from("sess-attached"),
+        profile: SessionProfile::attached_windows(
+            DomainProfile::Generic,
+            WindowLocator {
+                window_id: None,
+                title: None,
+                pid: None,
+                process_name: Some("notepad.exe".to_owned()),
+                class_name: Some("Notepad".to_owned()),
+            },
+        ),
+        shallow: false,
+    };
+
+    let session = backend.open_session(params).await.expect("open session");
+
+    assert_eq!(session.initial_snapshot.windows.len(), 1);
+    assert_eq!(
+        session.initial_snapshot.windows[0].title,
+        "Untitled - Notepad"
+    );
 }
 
 #[tokio::test]
@@ -174,7 +250,7 @@ async fn configurator_mode_marks_fallback_surfaces() {
     let backend = WindowsBackend::from_source(source);
     let params = BackendSessionParams {
         session_id: vmui_protocol::SessionId::from("sess-config"),
-        mode: SessionMode::Configurator,
+        profile: SessionProfile::onec_configurator(),
         shallow: false,
     };
 
@@ -216,7 +292,7 @@ async fn initial_snapshot_preserves_backend_provenance_and_confidence() {
     let backend = WindowsBackend::from_source(source);
     let params = BackendSessionParams {
         session_id: vmui_protocol::SessionId::from("sess-config-provenance"),
-        mode: SessionMode::Configurator,
+        profile: SessionProfile::onec_configurator(),
         shallow: false,
     };
     let session = backend.open_session(params).await.expect("open session");
@@ -357,8 +433,69 @@ impl ObservationSource for FakeObservationSource {
 fn test_params() -> BackendSessionParams {
     BackendSessionParams {
         session_id: vmui_protocol::SessionId::from("sess-test"),
-        mode: SessionMode::EnterpriseUi,
+        profile: SessionProfile::onec_enterprise_ui(),
         shallow: false,
+    }
+}
+
+fn sample_generic_window(
+    hwnd: usize,
+    title: &str,
+    process_name: &str,
+    class_name: &str,
+) -> WindowState {
+    let window_fingerprint = format!(
+        "pid={}:hwnd={:016x}:class={}:title={}",
+        hwnd as u32,
+        hwnd,
+        class_name.to_lowercase(),
+        title.to_lowercase()
+    );
+    let root_id = element_id_from_locator(&window_fingerprint, &[]);
+    WindowState {
+        window_id: window_id_from_fingerprint(&window_fingerprint),
+        pid: hwnd as u32,
+        process_name: Some(process_name.to_owned()),
+        title: title.to_owned(),
+        bounds: Rect {
+            left: 0,
+            top: 0,
+            width: 100,
+            height: 50,
+        },
+        backend: BackendKind::Uia,
+        confidence: 1.0,
+        root: ElementNode {
+            element_id: root_id,
+            parent_id: None,
+            backend: BackendKind::Uia,
+            control_type: "Window".to_owned(),
+            class_name: Some(class_name.to_owned()),
+            name: Some(title.to_owned()),
+            automation_id: None,
+            native_window_handle: Some(hwnd as u64),
+            bounds: Rect {
+                left: 0,
+                top: 0,
+                width: 100,
+                height: 50,
+            },
+            locator: Locator {
+                window_fingerprint,
+                path: Vec::new(),
+            },
+            properties: BTreeMap::new(),
+            states: ElementStates {
+                enabled: true,
+                visible: true,
+                focused: false,
+                selected: false,
+                expanded: false,
+                toggled: false,
+            },
+            children: Vec::new(),
+            confidence: 1.0,
+        },
     }
 }
 

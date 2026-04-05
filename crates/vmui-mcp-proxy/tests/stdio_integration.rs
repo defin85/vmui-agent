@@ -28,7 +28,7 @@ use vmui_platform::{
 };
 use vmui_protocol::{
     ActionRequest, ActionStatus, BackendKind, ElementId, ElementNode, ElementStates, Locator,
-    PropertyValue, Rect, SessionId, SessionMode, UiSnapshot, WindowId, WindowState,
+    PropertyValue, Rect, SessionId, SessionProfile, UiSnapshot, WindowId, WindowState,
 };
 use vmui_transport_grpc::pb;
 
@@ -60,13 +60,13 @@ impl UiBackend for CountingBackend {
     async fn open_session(&self, params: BackendSessionParams) -> anyhow::Result<BackendSession> {
         self.open_session_calls.fetch_add(1, Ordering::SeqCst);
         Ok(BackendSession {
-            initial_snapshot: sample_snapshot(params.session_id, params.mode, 1),
+            initial_snapshot: sample_snapshot(params.session_id, params.profile, 1),
             events: Box::pin(tokio_stream::empty::<BackendEvent>()),
         })
     }
 
     async fn capture_snapshot(&self, params: BackendSessionParams) -> anyhow::Result<UiSnapshot> {
-        Ok(sample_snapshot(params.session_id, params.mode, 1))
+        Ok(sample_snapshot(params.session_id, params.profile, 1))
     }
 
     async fn perform_action(&self, action: ActionRequest) -> anyhow::Result<BackendActionResult> {
@@ -103,7 +103,7 @@ async fn spawn_daemon(
         AgentConfig {
             bind_addr: actual_addr.to_string(),
             artifact_dir,
-            default_mode: SessionMode::EnterpriseUi,
+            default_profile: enterprise_profile(),
             artifact_retention: ArtifactRetentionPolicy {
                 max_age_seconds: 24 * 60 * 60,
                 max_bytes: 128 * 1024 * 1024,
@@ -220,8 +220,17 @@ async fn logical_session_reuses_one_daemon_stream_for_related_reads() {
     .expect("spawn daemon");
     let proxy = spawn_proxy(daemon.addr).await;
 
-    let opened: SessionOpenResult =
-        call_tool(&proxy, "session_open", json!({ "mode": "enterprise_ui" })).await;
+    let opened: SessionOpenResult = call_tool(
+        &proxy,
+        "session_open",
+        json!({
+            "profile": {
+                "observationScope": "desktop",
+                "domainProfile": "onec_enterprise_ui"
+            }
+        }),
+    )
+    .await;
     let windows: ReadEnvelope = call_tool(
         &proxy,
         "list_windows",
@@ -259,10 +268,28 @@ async fn omitting_session_id_is_rejected_when_multiple_sessions_exist() {
     .expect("spawn daemon");
     let proxy = spawn_proxy(daemon.addr).await;
 
-    let _: SessionOpenResult =
-        call_tool(&proxy, "session_open", json!({ "mode": "enterprise_ui" })).await;
-    let _: SessionOpenResult =
-        call_tool(&proxy, "session_open", json!({ "mode": "configurator" })).await;
+    let _: SessionOpenResult = call_tool(
+        &proxy,
+        "session_open",
+        json!({
+            "profile": {
+                "observationScope": "desktop",
+                "domainProfile": "onec_enterprise_ui"
+            }
+        }),
+    )
+    .await;
+    let _: SessionOpenResult = call_tool(
+        &proxy,
+        "session_open",
+        json!({
+            "profile": {
+                "observationScope": "desktop",
+                "domainProfile": "onec_configurator"
+            }
+        }),
+    )
+    .await;
 
     let error = call_tool_expect_error(&proxy, "session_status", json!({})).await;
     assert_eq!(error.code.0, rmcp::model::ErrorCode::INVALID_PARAMS.0);
@@ -271,11 +298,15 @@ async fn omitting_session_id_is_rejected_when_multiple_sessions_exist() {
     stop_daemon(daemon).await;
 }
 
-fn sample_snapshot(session_id: SessionId, mode: SessionMode, rev: u64) -> UiSnapshot {
+fn enterprise_profile() -> SessionProfile {
+    SessionProfile::onec_enterprise_ui()
+}
+
+fn sample_snapshot(session_id: SessionId, profile: SessionProfile, rev: u64) -> UiSnapshot {
     UiSnapshot {
         session_id,
         rev,
-        mode,
+        profile,
         captured_at: Utc
             .timestamp_millis_opt(1_700_000_000_123)
             .single()

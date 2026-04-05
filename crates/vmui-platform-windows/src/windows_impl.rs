@@ -75,9 +75,9 @@ use windows::{
 };
 
 use super::{
-    element_id_from_locator, matches_onec_metadata_hint, normalize_for_key,
-    normalize_optional_for_key, window_id_from_fingerprint, HintSource, ObservationSource,
-    RefreshRequest, RefreshScope, RefreshSubscription,
+    element_id_from_locator, normalize_for_key, normalize_optional_for_key,
+    window_id_from_fingerprint, HintSource, ObservationSource, RefreshRequest, RefreshScope,
+    RefreshSubscription,
 };
 
 static HOOK_SENDERS: OnceLock<Mutex<BTreeMap<isize, mpsc::UnboundedSender<RefreshRequest>>>> =
@@ -117,10 +117,6 @@ impl ObservationSource for WindowsObservationSource {
                 Some(metadata) => metadata,
                 None => continue,
             };
-            if !should_capture_window_for_mode(params, &metadata) {
-                continue;
-            }
-
             if let Some(window) =
                 capture_window_from_metadata(params, hwnd, &metadata, HintSource::Uia)?
             {
@@ -142,10 +138,6 @@ impl ObservationSource for WindowsObservationSource {
             Some(metadata) => metadata,
             None => return Ok(None),
         };
-        if !should_capture_window_for_mode(params, &metadata) {
-            return Ok(None);
-        }
-
         capture_window_from_metadata(params, hwnd, &metadata, hint)
     }
 
@@ -270,18 +262,6 @@ fn read_window_metadata(hwnd: HWND) -> Result<Option<WindowMetadata>> {
             bounds,
         }))
     }
-}
-
-fn should_capture_window_for_mode(
-    params: &vmui_platform::BackendSessionParams,
-    metadata: &WindowMetadata,
-) -> bool {
-    matches_onec_metadata_hint(
-        metadata.process_name.as_deref(),
-        metadata.title.as_str(),
-        metadata.class_name.as_deref(),
-        &params.mode,
-    )
 }
 
 fn capture_window_from_metadata(

@@ -30,27 +30,105 @@ pub enum ConvertError {
     InvalidTimestamp(i64),
 }
 
-impl TryFrom<pb::SessionMode> for domain::SessionMode {
+impl TryFrom<pb::ObservationScope> for domain::ObservationScope {
     type Error = ConvertError;
 
-    fn try_from(value: pb::SessionMode) -> Result<Self, Self::Error> {
+    fn try_from(value: pb::ObservationScope) -> Result<Self, Self::Error> {
         match value {
-            pb::SessionMode::EnterpriseUi => Ok(Self::EnterpriseUi),
-            pb::SessionMode::Configurator => Ok(Self::Configurator),
-            pb::SessionMode::Unspecified => Err(ConvertError::InvalidEnumValue {
-                field: "session_mode",
+            pb::ObservationScope::Desktop => Ok(Self::Desktop),
+            pb::ObservationScope::AttachedWindows => Ok(Self::AttachedWindows),
+            pb::ObservationScope::Unspecified => Err(ConvertError::InvalidEnumValue {
+                field: "observation_scope",
                 value: value as i32,
             }),
         }
     }
 }
 
-impl From<domain::SessionMode> for pb::SessionMode {
-    fn from(value: domain::SessionMode) -> Self {
+impl From<domain::ObservationScope> for pb::ObservationScope {
+    fn from(value: domain::ObservationScope) -> Self {
         match value {
-            domain::SessionMode::EnterpriseUi => Self::EnterpriseUi,
-            domain::SessionMode::Configurator => Self::Configurator,
+            domain::ObservationScope::Desktop => Self::Desktop,
+            domain::ObservationScope::AttachedWindows => Self::AttachedWindows,
         }
+    }
+}
+
+impl TryFrom<pb::DomainProfile> for domain::DomainProfile {
+    type Error = ConvertError;
+
+    fn try_from(value: pb::DomainProfile) -> Result<Self, Self::Error> {
+        match value {
+            pb::DomainProfile::Generic => Ok(Self::Generic),
+            pb::DomainProfile::OnecEnterpriseUi => Ok(Self::OnecEnterpriseUi),
+            pb::DomainProfile::OnecConfigurator => Ok(Self::OnecConfigurator),
+            pb::DomainProfile::Unspecified => Err(ConvertError::InvalidEnumValue {
+                field: "domain_profile",
+                value: value as i32,
+            }),
+        }
+    }
+}
+
+impl From<domain::DomainProfile> for pb::DomainProfile {
+    fn from(value: domain::DomainProfile) -> Self {
+        match value {
+            domain::DomainProfile::Generic => Self::Generic,
+            domain::DomainProfile::OnecEnterpriseUi => Self::OnecEnterpriseUi,
+            domain::DomainProfile::OnecConfigurator => Self::OnecConfigurator,
+        }
+    }
+}
+
+impl From<domain::WindowLocator> for pb::WindowFilter {
+    fn from(value: domain::WindowLocator) -> Self {
+        Self {
+            window_id: value
+                .window_id
+                .map(|window_id| window_id.into_inner())
+                .unwrap_or_default(),
+            pid: value.pid.unwrap_or_default(),
+            process_name: value.process_name.unwrap_or_default(),
+            title: value.title.unwrap_or_default(),
+            class_name: value.class_name.unwrap_or_default(),
+        }
+    }
+}
+
+impl TryFrom<pb::WindowFilter> for domain::WindowLocator {
+    type Error = ConvertError;
+
+    fn try_from(value: pb::WindowFilter) -> Result<Self, Self::Error> {
+        Ok(domain::WindowLocator {
+            window_id: none_if_empty(value.window_id).map(Into::into),
+            title: none_if_empty(value.title),
+            pid: (value.pid != 0).then_some(value.pid),
+            process_name: none_if_empty(value.process_name),
+            class_name: none_if_empty(value.class_name),
+        })
+    }
+}
+
+impl From<domain::SessionProfile> for pb::SessionProfile {
+    fn from(value: domain::SessionProfile) -> Self {
+        Self {
+            observation_scope: pb::ObservationScope::from(value.observation_scope) as i32,
+            domain_profile: pb::DomainProfile::from(value.domain_profile) as i32,
+            target_filter: value.target_filter.map(Into::into),
+        }
+    }
+}
+
+impl TryFrom<pb::SessionProfile> for domain::SessionProfile {
+    type Error = ConvertError;
+
+    fn try_from(value: pb::SessionProfile) -> Result<Self, Self::Error> {
+        Ok(domain::SessionProfile {
+            observation_scope: decode_observation_scope(value.observation_scope)?,
+            domain_profile: decode_domain_profile(value.domain_profile)?,
+            target_filter: value.target_filter.map(TryInto::try_into).transpose()?,
+        }
+        .normalized())
     }
 }
 
@@ -71,7 +149,7 @@ impl TryFrom<pb::Hello> for domain::Hello {
         Ok(Self {
             client_name: value.client_name,
             client_version: value.client_version,
-            requested_mode: decode_session_mode(value.requested_mode)?,
+            requested_profile: decode_session_profile(value.requested_profile)?,
         })
     }
 }
@@ -83,7 +161,7 @@ impl From<domain::HelloAck> for pb::HelloAck {
             server_version: value.server_version,
             backend_id: value.backend_id,
             capabilities: value.capabilities,
-            negotiated_mode: pb::SessionMode::from(value.negotiated_mode) as i32,
+            negotiated_profile: Some(value.negotiated_profile.into()),
         }
     }
 }
@@ -97,7 +175,7 @@ impl TryFrom<pb::HelloAck> for domain::HelloAck {
             server_version: value.server_version,
             backend_id: value.backend_id,
             capabilities: value.capabilities,
-            negotiated_mode: decode_session_mode(value.negotiated_mode)?,
+            negotiated_profile: decode_session_profile(value.negotiated_profile)?,
         })
     }
 }
@@ -256,7 +334,7 @@ impl From<domain::UiSnapshot> for pb::InitialSnapshot {
         Self {
             session_id: value.session_id.into_inner(),
             rev: value.rev,
-            mode: pb::SessionMode::from(value.mode) as i32,
+            profile: Some(value.profile.into()),
             captured_at_unix_ms: value.captured_at.timestamp_millis(),
             windows: value.windows.into_iter().map(Into::into).collect(),
         }
@@ -270,7 +348,7 @@ impl TryFrom<pb::InitialSnapshot> for domain::UiSnapshot {
         Ok(Self {
             session_id: value.session_id.into(),
             rev: value.rev,
-            mode: decode_session_mode(value.mode)?,
+            profile: decode_session_profile(value.profile)?,
             captured_at: utc_from_millis(value.captured_at_unix_ms)?,
             windows: value
                 .windows
@@ -779,10 +857,27 @@ fn parse_action_kind(kind: &str, payload_json: &str) -> Result<domain::ActionKin
     }
 }
 
-fn decode_session_mode(value: i32) -> Result<domain::SessionMode, ConvertError> {
-    pb::SessionMode::try_from(value)
+fn decode_session_profile(
+    value: Option<pb::SessionProfile>,
+) -> Result<domain::SessionProfile, ConvertError> {
+    value
+        .ok_or(ConvertError::MissingField("session_profile"))?
+        .try_into()
+}
+
+fn decode_observation_scope(value: i32) -> Result<domain::ObservationScope, ConvertError> {
+    pb::ObservationScope::try_from(value)
         .map_err(|_| ConvertError::InvalidEnumValue {
-            field: "session_mode",
+            field: "observation_scope",
+            value,
+        })?
+        .try_into()
+}
+
+fn decode_domain_profile(value: i32) -> Result<domain::DomainProfile, ConvertError> {
+    pb::DomainProfile::try_from(value)
+        .map_err(|_| ConvertError::InvalidEnumValue {
+            field: "domain_profile",
             value,
         })?
         .try_into()
@@ -906,7 +1001,7 @@ mod tests {
     use vmui_protocol::{
         ActionId, ActionKind, ActionRequest, ActionTarget, BackendKind, CapturePolicy,
         DiagnosticBundleOptions, DiagnosticStepVerdict, ElementId, ElementNode, ElementStates,
-        Locator, PropertyValue, Rect, RuntimeStatusRequest, SessionId, SessionMode, TreeRequest,
+        Locator, PropertyValue, Rect, RuntimeStatusRequest, SessionId, SessionProfile, TreeRequest,
         UiSnapshot, WindowId, WindowState,
     };
 
@@ -916,7 +1011,7 @@ mod tests {
         UiSnapshot {
             session_id: SessionId::from("sess-1"),
             rev: 7,
-            mode: SessionMode::Configurator,
+            profile: SessionProfile::onec_configurator(),
             captured_at: Utc
                 .timestamp_millis_opt(1_700_000_000_123)
                 .single()
@@ -1047,7 +1142,10 @@ mod tests {
         match wire.payload.expect("payload") {
             pb::server_msg::Payload::InitialSnapshot(snapshot) => {
                 assert_eq!(snapshot.rev, 7);
-                assert_eq!(snapshot.mode, pb::SessionMode::Configurator as i32);
+                assert_eq!(
+                    snapshot.profile,
+                    Some(pb::SessionProfile::from(SessionProfile::onec_configurator()))
+                );
             }
             other => panic!("unexpected payload: {other:?}"),
         }
@@ -1059,7 +1157,9 @@ mod tests {
             payload: Some(pb::client_msg::Payload::Hello(pb::Hello {
                 client_name: "test".to_owned(),
                 client_version: "0.1.0".to_owned(),
-                requested_mode: pb::SessionMode::EnterpriseUi as i32,
+                requested_profile: Some(pb::SessionProfile::from(
+                    SessionProfile::onec_enterprise_ui(),
+                )),
             })),
         };
 
@@ -1068,7 +1168,10 @@ mod tests {
         match decoded {
             domain::ClientMessage::Hello(hello) => {
                 assert_eq!(hello.client_name, "test");
-                assert_eq!(hello.requested_mode, SessionMode::EnterpriseUi);
+                assert_eq!(
+                    hello.requested_profile,
+                    SessionProfile::onec_enterprise_ui()
+                );
             }
             other => panic!("unexpected message: {other:?}"),
         }
