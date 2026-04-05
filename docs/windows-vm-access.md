@@ -139,6 +139,30 @@ VMUI_DAEMON_ADDR=http://127.0.0.1:50051 cargo run -p vmui-mcp-proxy
 ./scripts/vm/pull-artifacts.sh --extract
 ```
 
+### Live Configurator panel probe
+
+Use the repo-tracked helper when Configurator is already open in the interactive VM session and you want aligned `HWND/UIA/MSAA/hit-test/capture` evidence for one selected surface.
+
+Example:
+
+```bash
+./scripts/vm/tunnel.sh --background
+VMUI_DAEMON_ADDR=http://127.0.0.1:50051 \
+VMUI_REMOTE_SCOPE=attached_windows \
+VMUI_REMOTE_DOMAIN_PROFILE=onec_configurator \
+VMUI_REMOTE_PROCESS_NAME=1cv8.exe \
+VMUI_REMOTE_PANEL_PROBE=1 \
+VMUI_REMOTE_PANEL_PROBE_UIA_MAX_DEPTH=6 \
+VMUI_REMOTE_PANEL_PROBE_MSAA_MAX_DEPTH=3 \
+VMUI_REMOTE_PANEL_PROBE_PATH=var/tmp/panel-probe.json \
+cargo run -p vmui-mcp-proxy --example remote_session_smoke
+```
+
+Notes:
+
+- The helper returns `panel-probe-json`, which references the persisted per-layer artifacts.
+- For the left Configurator tree, prefer an `attached_windows` session filter that resolves only the active `1cv8.exe` Configurator window before probing a narrower element or region target.
+
 ## Recommended Bootstrap On The Windows VM
 
 1. Install and enable OpenSSH Server.

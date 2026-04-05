@@ -1658,6 +1658,8 @@ dependencies = [
  "chrono",
  "futures-util",
  "image",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "vmui-platform",

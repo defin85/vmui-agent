@@ -24,6 +24,12 @@ struct Config {
     dump_tree: bool,
     tree_raw: bool,
     tree_max_depth: Option<u32>,
+    panel_probe: bool,
+    panel_probe_element_id: Option<domain::ElementId>,
+    panel_probe_region: Option<domain::Rect>,
+    panel_probe_uia_max_depth: Option<u32>,
+    panel_probe_msaa_max_depth: Option<u32>,
+    panel_probe_path: Option<PathBuf>,
     capture_path: Option<PathBuf>,
     capture_format: domain::CaptureFormat,
 }
@@ -191,6 +197,39 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&tree)?);
     }
 
+    if config.panel_probe {
+        let probe_target = if let Some(element_id) = &config.panel_probe_element_id {
+            domain::ActionTarget::Element(domain::ElementLocator {
+                element_id: Some(element_id.clone()),
+                locator: None,
+            })
+        } else if let Some(bounds) = config.panel_probe_region {
+            domain::ActionTarget::Region(domain::RegionTarget {
+                window_id: Some(window.window_id.clone()),
+                bounds,
+            })
+        } else {
+            target.clone()
+        };
+        let probe = read_panel_probe_artifact(
+            &config.daemon_addr,
+            &outbound_tx,
+            &mut inbound,
+            probe_target,
+            config.panel_probe_uia_max_depth,
+            config.panel_probe_msaa_max_depth,
+            config.capture_format.clone(),
+        )
+        .await?;
+        if let Some(path) = &config.panel_probe_path {
+            fs::write(path, serde_json::to_vec_pretty(&probe)?)
+                .with_context(|| format!("failed to write panel probe to `{}`", path.display()))?;
+            eprintln!("panel_probe: {}", path.display());
+        } else {
+            println!("{}", serde_json::to_string_pretty(&probe)?);
+        }
+    }
+
     if let Some(path) = &config.capture_path {
         let capture_target = if let Some(element_id) = config
             .capture_element_id
@@ -302,6 +341,33 @@ impl Config {
             .map(|value| value.parse())
             .transpose()
             .context("invalid VMUI_REMOTE_TREE_MAX_DEPTH")?;
+        let panel_probe = parse_bool_env("VMUI_REMOTE_PANEL_PROBE");
+        let panel_probe_element_id = env::var("VMUI_REMOTE_PANEL_PROBE_ELEMENT_ID")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(domain::ElementId::from);
+        let panel_probe_region = env::var("VMUI_REMOTE_PANEL_PROBE_REGION")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(|value| parse_rect(&value))
+            .transpose()
+            .context("invalid VMUI_REMOTE_PANEL_PROBE_REGION")?;
+        let panel_probe_uia_max_depth = env::var("VMUI_REMOTE_PANEL_PROBE_UIA_MAX_DEPTH")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(|value| value.parse())
+            .transpose()
+            .context("invalid VMUI_REMOTE_PANEL_PROBE_UIA_MAX_DEPTH")?;
+        let panel_probe_msaa_max_depth = env::var("VMUI_REMOTE_PANEL_PROBE_MSAA_MAX_DEPTH")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(|value| value.parse())
+            .transpose()
+            .context("invalid VMUI_REMOTE_PANEL_PROBE_MSAA_MAX_DEPTH")?;
+        let panel_probe_path = env::var("VMUI_REMOTE_PANEL_PROBE_PATH")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
         let capture_path = env::var("VMUI_REMOTE_CAPTURE_PATH")
             .ok()
             .filter(|value| !value.is_empty())
@@ -321,8 +387,10 @@ impl Config {
             other => bail!("unsupported VMUI_REMOTE_CAPTURE_FORMAT `{other}`"),
         };
 
-        if matches!(profile.observation_scope, domain::ObservationScope::AttachedWindows)
-            && profile.target_filter.is_none()
+        if matches!(
+            profile.observation_scope,
+            domain::ObservationScope::AttachedWindows
+        ) && profile.target_filter.is_none()
         {
             bail!("attached_windows scope requires at least one VMUI_REMOTE_* filter");
         }
@@ -338,6 +406,12 @@ impl Config {
             dump_tree,
             tree_raw,
             tree_max_depth,
+            panel_probe,
+            panel_probe_element_id,
+            panel_probe_region,
+            panel_probe_uia_max_depth,
+            panel_probe_msaa_max_depth,
+            panel_probe_path,
             capture_path,
             capture_format,
         })
@@ -356,8 +430,30 @@ fn normalize_daemon_addr(raw: &str) -> String {
 fn parse_bool_env(name: &str) -> bool {
     env::var(name)
         .ok()
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
         .unwrap_or(false)
+}
+
+fn parse_rect(raw: &str) -> Result<domain::Rect> {
+    let parts = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() != 4 {
+        bail!("expected `left,top,width,height`, got `{raw}`");
+    }
+    Ok(domain::Rect {
+        left: parts[0].parse().context("invalid rect left")?,
+        top: parts[1].parse().context("invalid rect top")?,
+        width: parts[2].parse().context("invalid rect width")?,
+        height: parts[3].parse().context("invalid rect height")?,
+    })
 }
 
 async fn send_client_message(
@@ -490,13 +586,50 @@ async fn capture_region_artifact(
     read_artifact_bytes(daemon_addr, &artifact.artifact_id).await
 }
 
+async fn read_panel_probe_artifact(
+    daemon_addr: &str,
+    outbound_tx: &mpsc::Sender<pb::ClientMsg>,
+    inbound: &mut tonic::Streaming<pb::ServerMsg>,
+    target: domain::ActionTarget,
+    uia_max_depth: Option<u32>,
+    msaa_max_depth: Option<u32>,
+    capture_format: domain::CaptureFormat,
+) -> Result<Value> {
+    let result = perform_action(
+        outbound_tx,
+        inbound,
+        domain::ActionRequest {
+            action_id: domain::ActionId::from("remote-session-panel-probe"),
+            timeout_ms: 20_000,
+            target,
+            kind: domain::ActionKind::PanelProbe(domain::PanelProbeOptions {
+                uia_max_depth,
+                msaa_max_depth,
+                capture_format,
+            }),
+            capture_policy: domain::CapturePolicy::Never,
+        },
+    )
+    .await?;
+
+    let artifact = result
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "panel-probe-json")
+        .context("panel_probe did not produce a panel-probe-json artifact")?;
+    read_json_artifact(daemon_addr, &artifact.artifact_id).await
+}
+
 async fn read_json_artifact(daemon_addr: &str, artifact_id: &domain::ArtifactId) -> Result<Value> {
     let bytes = read_artifact_bytes(daemon_addr, artifact_id).await?;
     serde_json::from_slice(&bytes)
         .with_context(|| format!("failed to decode artifact `{artifact_id}` as JSON"))
 }
 
-async fn read_artifact_bytes(daemon_addr: &str, artifact_id: &domain::ArtifactId) -> Result<Vec<u8>> {
+async fn read_artifact_bytes(
+    daemon_addr: &str,
+    artifact_id: &domain::ArtifactId,
+) -> Result<Vec<u8>> {
     let channel = Endpoint::from_shared(daemon_addr.to_owned())
         .context("invalid VMUI_DAEMON_ADDR")?
         .connect()

@@ -11,6 +11,8 @@ async-trait.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 vmui-platform = { path = "../vmui-platform" }

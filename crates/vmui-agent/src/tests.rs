@@ -21,9 +21,10 @@ use vmui_platform::{
 use vmui_protocol::{
     ActionId, ActionRequest, ActionStatus, ActionTarget, ArtifactId, BackendKind, CapturePolicy,
     DiagnosticBundleOptions, DiagnosticStepVerdict, DiffOp, ElementId, ElementLocator, ElementNode,
-    ElementStates, Locator, PropertyValue, Rect, RuntimeHealthState, RuntimeStatusRequest,
-    SessionId, SessionProfile, TreeRequest, UiDiffBatch, UiSnapshot, WaitCondition, WaitForOptions,
-    WindowId, WindowLocator, WindowState,
+    ElementStates, Locator, PanelProbeLayer, PanelProbeLayerKind, PanelProbeMetadata,
+    PanelProbeOptions, PanelProbeSurface, PanelProbeTargetKind, ProbeLayerStatus, PropertyValue,
+    Rect, RuntimeHealthState, RuntimeStatusRequest, SessionId, SessionProfile, TreeRequest,
+    UiDiffBatch, UiSnapshot, WaitCondition, WaitForOptions, WindowId, WindowLocator, WindowState,
 };
 use vmui_transport_grpc::encode_action_request;
 use vmui_transport_grpc::pb::{self, client_msg, server_msg, ui_agent_client::UiAgentClient};
@@ -991,6 +992,158 @@ async fn collect_diagnostic_bundle_persists_bundle_diff_and_baseline_comparison(
         .expect("changed_fields array")
         .iter()
         .any(|value| value == "tree_state"));
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn panel_probe_persists_bundle_manifest_with_hydrated_artifact_ids() {
+    let dir = tempdir().expect("tempdir");
+    let metadata = PanelProbeMetadata {
+        surface: PanelProbeSurface {
+            target_kind: PanelProbeTargetKind::Element,
+            window_id: Some(WindowId::from("wnd-1")),
+            pid: Some(10),
+            process_name: Some("1cv8c.exe".to_owned()),
+            title: Some("Configurator".to_owned()),
+            class_name: Some("V8TopLevelFrame".to_owned()),
+            bounds: Rect {
+                left: 10,
+                top: 20,
+                width: 200,
+                height: 160,
+            },
+            target_element_id: Some(ElementId::from("elt-1")),
+            target_locator: Some(Locator {
+                window_fingerprint: "1cv8c.exe:Configurator".to_owned(),
+                path: vec![],
+            }),
+            target_backend: Some(BackendKind::Uia),
+        },
+        layers: vec![
+            PanelProbeLayer {
+                layer: PanelProbeLayerKind::HwndHierarchy,
+                status: ProbeLayerStatus::Observed,
+                artifact_kind: Some("panel-probe-hwnd-json".to_owned()),
+                artifact_id: None,
+                mime_type: None,
+                message: Some("hwnd ok".to_owned()),
+            },
+            PanelProbeLayer {
+                layer: PanelProbeLayerKind::Msaa,
+                status: ProbeLayerStatus::Insufficient,
+                artifact_kind: Some("panel-probe-msaa-json".to_owned()),
+                artifact_id: None,
+                mime_type: None,
+                message: Some("msaa shallow".to_owned()),
+            },
+            PanelProbeLayer {
+                layer: PanelProbeLayerKind::Capture,
+                status: ProbeLayerStatus::Observed,
+                artifact_kind: Some("screenshot-png".to_owned()),
+                artifact_id: None,
+                mime_type: None,
+                message: Some("capture ok".to_owned()),
+            },
+        ],
+    };
+    let backend = StubBackend::with_action_result(
+        ActionStatus::Completed,
+        true,
+        "probe ok",
+        vec![
+            BackendArtifact {
+                kind: "panel-probe-hwnd-json".to_owned(),
+                mime_type: "application/json".to_owned(),
+                bytes: b"{\"nodes\":[]}".to_vec(),
+            },
+            BackendArtifact {
+                kind: "panel-probe-msaa-json".to_owned(),
+                mime_type: "application/json".to_owned(),
+                bytes: b"{\"root\":null}".to_vec(),
+            },
+            BackendArtifact {
+                kind: "screenshot-png".to_owned(),
+                mime_type: "image/png".to_owned(),
+                bytes: vec![1, 2, 3, 4],
+            },
+            BackendArtifact {
+                kind: "panel-probe-metadata-json".to_owned(),
+                mime_type: "application/json".to_owned(),
+                bytes: serde_json::to_vec(&metadata).expect("probe metadata json"),
+            },
+        ],
+    );
+    let (mut client, shutdown, _) =
+        spawn_test_server_with_backend(dir.path().to_path_buf(), backend)
+            .await
+            .expect("spawn server");
+
+    let outbound = tokio_stream::iter(vec![
+        test_hello(configurator_profile()),
+        pb::ClientMsg {
+            payload: Some(client_msg::Payload::Subscribe(pb::Subscribe {
+                include_initial_snapshot: false,
+                include_diff_stream: false,
+                shallow: false,
+            })),
+        },
+        pb::ClientMsg {
+            payload: Some(client_msg::Payload::ActionRequest(
+                encode_action_request(&ActionRequest {
+                    action_id: ActionId::from("probe-1"),
+                    timeout_ms: 2_000,
+                    target: ActionTarget::Element(ElementLocator {
+                        element_id: Some(ElementId::from("elt-1")),
+                        locator: None,
+                    }),
+                    kind: vmui_protocol::ActionKind::PanelProbe(PanelProbeOptions {
+                        uia_max_depth: Some(6),
+                        msaa_max_depth: Some(3),
+                        capture_format: vmui_protocol::CaptureFormat::Png,
+                    }),
+                    capture_policy: CapturePolicy::Never,
+                })
+                .expect("encode probe action"),
+            )),
+        },
+    ]);
+
+    let response = client.session(outbound).await.expect("session RPC");
+    let mut inbound = response.into_inner();
+    let _ = inbound.message().await.expect("ack read").expect("ack");
+    let _ = inbound
+        .message()
+        .await
+        .expect("snapshot read")
+        .expect("snapshot payload");
+
+    let result = inbound
+        .message()
+        .await
+        .expect("action result read")
+        .expect("action result payload");
+
+    let artifacts = match result.payload.expect("payload") {
+        server_msg::Payload::ActionResult(result) => {
+            assert!(result.ok);
+            assert_eq!(result.status, "completed");
+            result.artifacts
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    };
+
+    let bundle_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "panel-probe-json")
+        .expect("panel probe bundle artifact");
+    let bundle_json = read_artifact_json(&mut client, bundle_artifact.artifact_id.clone()).await;
+
+    assert_eq!(bundle_json["surface"]["target_kind"], "element");
+    assert_eq!(bundle_json["layers"].as_array().map(Vec::len), Some(3));
+    for layer in bundle_json["layers"].as_array().expect("layers array") {
+        assert!(layer["artifact_id"].as_str().is_some());
+    }
 
     let _ = shutdown.send(());
 }

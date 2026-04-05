@@ -519,6 +519,37 @@ impl VmuiMcpProxy {
     }
 
     #[tool(
+        description = "Collect an out-of-process panel probe bundle for a selected live Windows or 1C surface.",
+        annotations(read_only_hint = true, destructive_hint = false)
+    )]
+    async fn panel_probe(
+        &self,
+        Parameters(params): Parameters<PanelProbeParams>,
+    ) -> Result<Content, rmcp::ErrorData> {
+        let (session_id, worker) = self.resolve_session(params.session_id.as_deref()).await?;
+        let outcome = worker
+            .execute_action(
+                domain::ActionRequest {
+                    action_id: domain::ActionId::new("mcp-panel-probe"),
+                    timeout_ms: params.timeout_ms.unwrap_or(10_000),
+                    target: params.target.try_into()?,
+                    kind: domain::ActionKind::PanelProbe(domain::PanelProbeOptions {
+                        uia_max_depth: params.uia_max_depth,
+                        msaa_max_depth: params.msaa_max_depth,
+                        capture_format: params
+                            .capture_format
+                            .unwrap_or(CaptureFormatParam::Png)
+                            .into(),
+                    }),
+                    capture_policy: domain::CapturePolicy::Never,
+                },
+                true,
+            )
+            .await?;
+        Content::json(ActionEnvelope::from_outcome(session_id, outcome))
+    }
+
+    #[tool(
         description = "Read a daemon artifact and decode it as JSON.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
@@ -1218,6 +1249,22 @@ impl From<CapturePolicyParam> for domain::CapturePolicy {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+pub enum CaptureFormatParam {
+    Png,
+    Jpeg,
+}
+
+impl From<CaptureFormatParam> for domain::CaptureFormat {
+    fn from(value: CaptureFormatParam) -> Self {
+        match value {
+            CaptureFormatParam::Png => Self::Png,
+            CaptureFormatParam::Jpeg => Self::Jpeg,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum WaitConditionParam {
     Exists,
     Visible,
@@ -1384,6 +1431,17 @@ pub struct CollectDiagnosticBundleParams {
     pub note: Option<String>,
     pub baseline_artifact_id: Option<String>,
     pub max_tree_depth: Option<u32>,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelProbeParams {
+    pub session_id: Option<String>,
+    pub target: TargetParams,
+    pub uia_max_depth: Option<u32>,
+    pub msaa_max_depth: Option<u32>,
+    pub capture_format: Option<CaptureFormatParam>,
     pub timeout_ms: Option<u64>,
 }
 

@@ -55,6 +55,7 @@
 - Every action can emit artifacts.
 - `wait_for` is server-side and runs against the live cache plus backend events.
 - `collect_diagnostic_bundle` is server-side and complements standard 1C automated testing by preserving the original external test verdict together with daemon-side state, recent diffs, baseline comparison, and target-scoped artifacts.
+- `panel_probe` is explicit research tooling for one selected surface; it stays off the hot read path and emits aligned evidence per layer instead of one synthetic tree.
 - `timeout_ms` applies both to daemon-side waits and backend action execution.
 - OCR requests are explicit and scoped to a region or window.
 - `capture_region` is explicit and scoped; `window_id + bounds` is interpreted as a window-relative region.
@@ -70,6 +71,14 @@
   - `diagnostic-json`
   - `baseline-comparison-json`
   - `runtime-status-json`
+  - `panel-probe-json`
+  - `panel-probe-metadata-json`
+  - `panel-probe-hwnd-json`
+  - `panel-probe-uia-raw-json`
+  - `panel-probe-uia-control-json`
+  - `panel-probe-uia-content-json`
+  - `panel-probe-msaa-json`
+  - `panel-probe-hit-test-json`
   - `screenshot-png`
   - `screenshot-jpeg`
   - `ocr-json`

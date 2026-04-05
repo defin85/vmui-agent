@@ -399,6 +399,7 @@ pub enum ActionKind {
     OcrRegion(OcrOptions),
     WriteArtifact(WriteArtifactOptions),
     CollectDiagnosticBundle(DiagnosticBundleOptions),
+    PanelProbe(PanelProbeOptions),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -491,6 +492,91 @@ pub struct DiagnosticBundleOptions {
     pub note: Option<String>,
     pub baseline_artifact_id: Option<ArtifactId>,
     pub max_tree_depth: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PanelProbeOptions {
+    pub uia_max_depth: Option<u32>,
+    pub msaa_max_depth: Option<u32>,
+    pub capture_format: CaptureFormat,
+}
+
+impl Default for PanelProbeOptions {
+    fn default() -> Self {
+        Self {
+            uia_max_depth: None,
+            msaa_max_depth: None,
+            capture_format: CaptureFormat::Png,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelProbeTargetKind {
+    Window,
+    Element,
+    Region,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelProbeLayerKind {
+    HwndHierarchy,
+    UiaRaw,
+    UiaControl,
+    UiaContent,
+    Msaa,
+    HitTest,
+    Capture,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeLayerStatus {
+    Observed,
+    Insufficient,
+    Unsupported,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PanelProbeSurface {
+    pub target_kind: PanelProbeTargetKind,
+    pub window_id: Option<WindowId>,
+    pub pid: Option<u32>,
+    pub process_name: Option<String>,
+    pub title: Option<String>,
+    pub class_name: Option<String>,
+    pub bounds: Rect,
+    pub target_element_id: Option<ElementId>,
+    pub target_locator: Option<Locator>,
+    pub target_backend: Option<BackendKind>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PanelProbeLayer {
+    pub layer: PanelProbeLayerKind,
+    pub status: ProbeLayerStatus,
+    pub artifact_kind: Option<String>,
+    pub artifact_id: Option<ArtifactId>,
+    pub mime_type: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PanelProbeMetadata {
+    pub surface: PanelProbeSurface,
+    pub layers: Vec<PanelProbeLayer>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PanelProbeBundle {
+    pub generated_at: DateTime<Utc>,
+    pub session_id: SessionId,
+    pub profile: SessionProfile,
+    pub target: ActionTarget,
+    pub surface: PanelProbeSurface,
+    pub layers: Vec<PanelProbeLayer>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

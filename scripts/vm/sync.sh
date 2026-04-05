@@ -56,7 +56,10 @@ entries = [item.decode("utf-8") for item in file_list.read_bytes().split(b"\0") 
 
 with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
     for relative_path in entries:
-        archive.write(repo_root / relative_path, relative_path)
+        source_path = repo_root / relative_path
+        if not source_path.exists():
+            continue
+        archive.write(source_path, relative_path)
 PY
 else
     git -C "$repo_root" archive --format=zip --output="$archive_path" HEAD

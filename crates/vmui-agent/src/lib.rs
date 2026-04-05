@@ -83,6 +83,9 @@ where
                 self.execute_collect_diagnostic_bundle(context, action, options)
                     .await
             }
+            domain::ActionKind::PanelProbe(options) => {
+                self.execute_panel_probe(context, action, options).await
+            }
             domain::ActionKind::OcrRegion(options)
                 if !self.backend.capabilities().supports_ocr_fallback =>
             {
@@ -406,6 +409,77 @@ where
                 options.step_label,
                 artifacts.len()
             ),
+            artifacts,
+        })
+    }
+
+    async fn execute_panel_probe(
+        &self,
+        context: &SessionContext,
+        action: domain::ActionRequest,
+        _options: domain::PanelProbeOptions,
+    ) -> Result<domain::ActionResult, Status> {
+        let action_timeout = Duration::from_millis(action.timeout_ms.max(1));
+        let backend_result =
+            match timeout(action_timeout, self.backend.perform_action(action.clone())).await {
+                Ok(result) => result.map_err(internal_status)?,
+                Err(_) => {
+                    return Ok(domain::ActionResult {
+                        action_id: action.action_id,
+                        ok: false,
+                        status: domain::ActionStatus::TimedOut,
+                        message: "panel_probe did not complete before timeout".to_owned(),
+                        artifacts: Vec::new(),
+                    });
+                }
+            };
+
+        let probe_metadata = panel_probe_metadata_from_artifacts(&backend_result.artifacts)
+            .map_err(internal_status)?;
+        let vmui_platform::BackendActionResult {
+            action_id,
+            ok,
+            status,
+            message,
+            artifacts: backend_artifacts,
+        } = backend_result;
+
+        let persisted_artifacts = {
+            let mut state = self.state.write().await;
+            persist_action_artifacts(
+                &mut state,
+                Some(context.session_id.clone()),
+                backend_artifacts,
+            )
+            .map_err(internal_status)?
+        };
+        let bundle = domain::PanelProbeBundle {
+            generated_at: Utc::now(),
+            session_id: context.session_id.clone(),
+            profile: context.profile.clone(),
+            target: action.target,
+            surface: probe_metadata.surface,
+            layers: hydrate_panel_probe_layers(probe_metadata.layers, &persisted_artifacts),
+        };
+        let bundle_artifact = {
+            let mut state = self.state.write().await;
+            write_json_artifact(
+                &mut state,
+                Some(context.session_id.clone()),
+                "panel-probe-json",
+                &bundle,
+            )
+            .map_err(internal_status)?
+        };
+
+        let mut artifacts = vec![bundle_artifact];
+        artifacts.extend(persisted_artifacts);
+
+        Ok(domain::ActionResult {
+            action_id,
+            ok,
+            status,
+            message,
             artifacts,
         })
     }
@@ -1008,6 +1082,40 @@ fn persist_action_artifacts(
                 .map_err(anyhow::Error::from)
         })
         .collect()
+}
+
+fn panel_probe_metadata_from_artifacts(
+    artifacts: &[BackendArtifact],
+) -> Result<domain::PanelProbeMetadata> {
+    let metadata = artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "panel-probe-metadata-json")
+        .ok_or_else(|| anyhow::anyhow!("panel probe result did not include metadata artifact"))?;
+    serde_json::from_slice(&metadata.bytes)
+        .context("failed to decode panel probe metadata artifact as JSON")
+}
+
+fn hydrate_panel_probe_layers(
+    mut layers: Vec<domain::PanelProbeLayer>,
+    artifacts: &[domain::ArtifactDescriptor],
+) -> Vec<domain::PanelProbeLayer> {
+    let descriptors = artifacts
+        .iter()
+        .map(|artifact| (artifact.kind.as_str(), artifact))
+        .collect::<BTreeMap<_, _>>();
+
+    for layer in &mut layers {
+        let Some(kind) = layer.artifact_kind.as_deref() else {
+            continue;
+        };
+        let Some(descriptor) = descriptors.get(kind) else {
+            continue;
+        };
+        layer.artifact_id = Some(descriptor.artifact_id.clone());
+        layer.mime_type = Some(descriptor.mime_type.clone());
+    }
+
+    layers
 }
 
 fn write_json_artifact<T: Serialize>(
@@ -1837,6 +1945,7 @@ fn should_attach_snapshot_artifact(
             | domain::ActionKind::GetRuntimeStatus(_)
             | domain::ActionKind::WriteArtifact(_)
             | domain::ActionKind::CollectDiagnosticBundle(_)
+            | domain::ActionKind::PanelProbe(_)
             | domain::ActionKind::CaptureRegion(_)
             | domain::ActionKind::OcrRegion(_)
     );
@@ -1987,6 +2096,7 @@ fn action_kind_label(kind: &domain::ActionKind) -> &'static str {
         domain::ActionKind::OcrRegion(_) => "ocr_region",
         domain::ActionKind::WriteArtifact(_) => "write_artifact",
         domain::ActionKind::CollectDiagnosticBundle(_) => "collect_diagnostic_bundle",
+        domain::ActionKind::PanelProbe(_) => "panel_probe",
     }
 }
 

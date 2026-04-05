@@ -65,6 +65,8 @@
 - Prefer an SSH local forward to the VM loopback daemon endpoint and run `vmui-mcp-proxy` locally on the Linux host.
 - For the canonical generic desktop smoke on the VM, use:
   `./scripts/vm/notepad-smoke.sh`
+- For a live out-of-process probe of the selected Configurator surface, run:
+  `VMUI_REMOTE_SCOPE=attached_windows VMUI_REMOTE_DOMAIN_PROFILE=onec_configurator VMUI_REMOTE_PROCESS_NAME=1cv8.exe VMUI_REMOTE_PANEL_PROBE=1 VMUI_REMOTE_PANEL_PROBE_PATH=var/tmp/panel-probe.json cargo run -p vmui-mcp-proxy --example remote_session_smoke`
 
 ## Changing Runtime Defaults
 

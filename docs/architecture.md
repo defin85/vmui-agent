@@ -59,6 +59,7 @@ UIA observer thread  WinEvent hook    MSAA fallback
 - Primary: UI Automation.
 - Secondary: WinEvent + MSAA/IAccessible.
 - Tertiary: region capture and OCR for opaque or owner-drawn surfaces only.
+- Out-of-band diagnostics such as `panel_probe` stay explicit and artifact-heavy; they do not redefine the normal snapshot/diff contract.
 
 ## Crate Map
 
