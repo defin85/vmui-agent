@@ -1075,8 +1075,9 @@ fn try_invoke_semantically(element: &IUIAutomationElement) -> Result<Option<Stri
     if let Ok(pattern) =
         unsafe { element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) }
     {
-        unsafe { pattern.Invoke() }.context("InvokePattern::Invoke failed")?;
-        return Ok(Some("semantic=invoke-pattern".to_owned()));
+        if unsafe { pattern.Invoke() }.is_ok() {
+            return Ok(Some("semantic=invoke-pattern".to_owned()));
+        }
     }
 
     if let Ok(pattern) = unsafe {
@@ -1084,9 +1085,9 @@ fn try_invoke_semantically(element: &IUIAutomationElement) -> Result<Option<Stri
             UIA_LegacyIAccessiblePatternId,
         )
     } {
-        unsafe { pattern.DoDefaultAction() }
-            .context("LegacyIAccessible::DoDefaultAction failed")?;
-        return Ok(Some("semantic=legacy-default-action".to_owned()));
+        if unsafe { pattern.DoDefaultAction() }.is_ok() {
+            return Ok(Some("semantic=legacy-default-action".to_owned()));
+        }
     }
 
     Ok(None)
