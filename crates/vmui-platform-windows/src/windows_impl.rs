@@ -674,6 +674,7 @@ pub(super) fn perform_action(action: ActionRequest) -> Result<BackendActionResul
         )),
         ActionKind::ListWindows
         | ActionKind::GetTree(_)
+        | ActionKind::GetRuntimeStatus(_)
         | ActionKind::WaitFor(_)
         | ActionKind::WriteArtifact(_)
         | ActionKind::CollectDiagnosticBundle(_) => Ok(super::unsupported_action(

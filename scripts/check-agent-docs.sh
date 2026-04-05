@@ -11,6 +11,8 @@ required_files=(
     "code_review.md"
     "docs/index.md"
     "docs/dev-runbook.md"
+    "docs/windows-vm-access.md"
+    "docs/windows-vm-bootstrap.md"
     "docs/codex-workflow.md"
     "docs/codex-setup.md"
     "crates/vmui-agent/AGENTS.md"

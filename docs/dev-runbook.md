@@ -55,6 +55,15 @@
 - Windows VM runtime:
   run `vmui-agent` inside the interactive desktop session, not in Session 0.
 
+## Remote Windows VM
+
+- Current remote test VM recorded on 2026-04-05:
+  `192.168.32.142`
+- Read `docs/windows-vm-access.md` before remote deploy/test or Windows VM bootstrap work.
+- Use `docs/windows-vm-bootstrap.md` for concrete Windows-side bootstrap commands.
+- Treat SSH administration and desktop-capable execution as different planes.
+- Prefer an SSH local forward to the VM loopback daemon endpoint and run `vmui-mcp-proxy` locally on the Linux host.
+
 ## Changing Runtime Defaults
 
 - Bind address, artifact dir, and default mode live in `crates/vmui-core/src/lib.rs`.

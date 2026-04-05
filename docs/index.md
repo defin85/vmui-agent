@@ -4,6 +4,8 @@
 
 - `README.md`: short product summary and high-level repository status.
 - `docs/dev-runbook.md`: canonical run, verification, and Codex setup notes.
+- `docs/windows-vm-access.md`: current Windows VM target, remote control-plane design, and deploy/test workflow.
+- `docs/windows-vm-bootstrap.md`: concrete Windows bootstrap commands for SSH, workdir, and scheduled tasks.
 - `docs/codex-workflow.md`: canonical search, verification, OpenSpec, and tracking workflow.
 - `docs/codex-setup.md`: local tool readiness, doctor flow, and optional Codex config notes.
 - `docs/architecture.md`: runtime shape, crate boundaries, and fallback model.

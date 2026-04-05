@@ -3,5 +3,7 @@
 /.vscode
 /.DS_Store
 /var/artifacts
+/var/vm-downloads
+/.vmui-vm.env
 /.beads/interactions.jsonl
 /.beads/last-touched

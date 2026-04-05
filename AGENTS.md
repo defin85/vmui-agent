@@ -40,10 +40,20 @@ Keep this managed block so 'openspec update' can refresh the instructions.
 ## Start Here
 - Read `docs/index.md` first for the repository map, task routing, and related docs.
 - Read `docs/dev-runbook.md` before changing startup flow, verification commands, or Codex-specific setup.
+- Read `docs/windows-vm-access.md` before remote deploy/test or Windows VM bootstrap work.
 - Read `docs/codex-workflow.md` for the canonical search, verification, OpenSpec, and Beads workflow.
 - Read `docs/codex-setup.md` and run `./scripts/doctor.sh` on a new machine before assuming local tool breakage.
 - For review requests, also follow `code_review.md`.
 - Expect more specific local guidance in `crates/vmui-agent/AGENTS.md`, `crates/vmui-core/AGENTS.md`, `crates/vmui-platform-windows/AGENTS.md`, `crates/vmui-transport-grpc/AGENTS.md`, and `proto/AGENTS.md`.
+
+## Remote Windows VM
+- Current remote test VM recorded on 2026-04-05:
+  `192.168.32.142`
+- For remote deploy/test work, treat `docs/windows-vm-access.md` as the control-plane source of truth.
+- Current VM bootstrap state:
+  SSH key access, PowerShell 7, `C:\vmui-agent`, `vmui-agent-session`, and `vmui-smoke` are already configured.
+- Keep UI automation and `vmui-agent` inside the interactive Windows session; do not assume an SSH or service session can touch the desktop.
+- Prefer a loopback-bound daemon plus SSH tunnel and local `vmui-mcp-proxy`; do not expose the daemon on the LAN by default.
 
 ## Agent Development Rules
 - Prefer event-driven state and semantic actions over screenshot polling.
